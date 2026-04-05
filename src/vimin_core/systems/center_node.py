@@ -134,7 +134,7 @@ class CenterNode:
         self.app = web.Application()
         self.agents: Dict[str, AgentInfo] = {}
         self.task_queue: List[Dict[str, Any]] = []
-        self.task_history: List[Dict[str, Any]] = []
+        self.task_history: deque = deque(maxlen=500)
         self.websocket_clients: List[web.WebSocketResponse] = []
         self._pending_commands: Dict[str, List[Dict[str, Any]]] = {}
         self._continuous_tasks: Dict[str, str] = {}
@@ -202,6 +202,7 @@ class CenterNode:
         # Infra
         r.add_get("/ws", self._websocket_handler)
         r.add_get("/health", self._health)
+        r.add_get("/api/health", self._health)
         r.add_get("/", self._serve_dashboard)
 
     def _setup_cors(self):
@@ -325,8 +326,10 @@ class CenterNode:
 
             # --- 10-node cap ---
             # Allow re-registration of an existing agent (restarts), but block new ones
-            # once the cap is reached.
-            if agent_id not in self.agents and len(self.agents) >= MAX_NODES:
+            # once the cap is reached. Count only online agents — offline/stale agents
+            # restored from DB on startup must not consume slots.
+            online_count = sum(1 for a in self.agents.values() if a.status == "online")
+            if agent_id not in self.agents and online_count >= MAX_NODES:
                 logger.warning(
                     f"Node cap ({MAX_NODES}) reached — rejecting new agent {agent_id}. "
                     "Upgrade to the full vimin distribution for larger fleets."
@@ -567,11 +570,63 @@ class CenterNode:
             })
 
             logger.info(f"Broadcast {broadcast_id} dispatched to {len(online_agents)} nodes")
+
+            # Wait for all task results so callers get inline results (like the
+            # README documents).  Callers can opt out with ?wait=false.
+            wait = str(request.rel_url.query.get("wait", "true")).lower() != "false"
+            timeout_s = float(request.rel_url.query.get("timeout", "120"))
+
+            if not wait:
+                return web.json_response({
+                    "status": "success",
+                    "broadcast_id": broadcast_id,
+                    "task_ids": task_ids,
+                    "dispatched_to": len(online_agents),
+                })
+
+            # Poll until all tasks report completion or timeout expires.
+            deadline = time.time() + timeout_s
+            while time.time() < deadline:
+                if all(tid in self._task_results for tid in task_ids):
+                    break
+                await asyncio.sleep(0.25)
+
+            results = []
+            for tid in task_ids:
+                result_payload = self._task_results.get(tid)
+                # Look up agent_id from the task record we built earlier
+                agent_id_for_task = next(
+                    (t.get("assigned_agent") for t in self.task_queue if t.get("id") == tid),
+                    None,
+                )
+                # Also check task_history (task may have been removed from queue)
+                if not agent_id_for_task:
+                    agent_id_for_task = next(
+                        (t.get("agent_id") for t in self.task_history
+                         if (t.get("task_id") or t.get("id")) == tid),
+                        tid[:8],
+                    )
+                if result_payload is not None:
+                    results.append({
+                        "agent_id": agent_id_for_task,
+                        "output": result_payload,
+                        "latency_ms": next(
+                            (t.get("execution_time_ms", 0) for t in self.task_history
+                             if (t.get("task_id") or t.get("id")) == tid),
+                            0,
+                        ),
+                    })
+                else:
+                    results.append({
+                        "agent_id": agent_id_for_task,
+                        "output": None,
+                        "error": "timeout",
+                    })
+
             return web.json_response({
                 "status": "success",
                 "broadcast_id": broadcast_id,
-                "task_ids": task_ids,
-                "dispatched_to": len(online_agents),
+                "results": results,
             })
 
         except Exception as e:
@@ -687,7 +742,7 @@ class CenterNode:
             if a.metrics_history:
                 cpus.append(a.metrics_history[-1].get("cpu_usage_percent", 0))
                 mems.append(a.metrics_history[-1].get("memory_usage_percent", 0))
-        recent = self.task_history[-200:]
+        recent = list(self.task_history)[-200:]
         latencies = [t.get("execution_time_ms", 0) for t in recent if t.get("execution_time_ms") is not None]
         return SystemMetrics(
             timestamp=get_utc_iso(),
@@ -952,8 +1007,13 @@ ws.onmessage = e => {
                     })
             self.task_queue = state.get("task_queue", [])
             self.task_history = deque(state.get("task_history", []), maxlen=500)
+            # Mark ALL restored agents offline — only a fresh registration proves
+            # an agent is currently running. This prevents stale agents from
+            # receiving broadcast tasks after a center node restart.
+            for agent in self.agents.values():
+                agent.status = "offline"
             logger.info(
-                f"Restored {len(self.agents)} agents, "
+                f"Restored {len(self.agents)} agents (all marked offline pending re-registration), "
                 f"{len(self.task_queue)} queued tasks from DB"
             )
         except Exception as e:

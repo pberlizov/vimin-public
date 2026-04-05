@@ -12,16 +12,8 @@ _W  = "\033[38;2;240;234;255m"  # #f0eaff  off-white
 _D  = "\033[38;2;110;90;180m"   # dim purple  (muted accents)
 _R  = "\033[0m"                  # reset
 
-# ASCII art — willow / neural-tree motif (8 lines, 38 cols wide)
-_LOGO = f"""\
-{_P}      ╭─╮   ╭─╮   ╭─╮{_R}
-{_P}     ╱   ╲ ╱   ╲ ╱   ╲{_R}
-{_L}    ●     ●     ●     ●{_R}
-{_P}     ╲   ╱ ╲   ╱ ╲   ╱{_R}
-{_P}      ╰─┬─╯   ╰─┬─╯{_R}
-{_P}        ╰───┬───╯{_R}
-{_P}            │{_R}
-{_L}        ────┴────{_R}"""
+# Logo wordmark
+_LOGO = f"{_P}  ◈ {_W}vimin{_R}{_D}-core{_R}"
 
 
 def _banner(title: str, fields: list[tuple[str, str]], width: int = 62) -> None:
@@ -43,8 +35,8 @@ def _banner(title: str, fields: list[tuple[str, str]], width: int = 62) -> None:
     for key, value in fields:
         label = f"{_L}{key}{_R}"
         val   = f"{_W}{value}{_R}"
-        raw_len = len(key) + 2 + len(value)   # ": " separator
-        spaces  = inner - raw_len - 4           # 2 leading + 2 trailing
+        raw_len = len(key) + 2 + len(value)   # key + ": " + value
+        spaces  = inner - raw_len - 2           # 2 leading spaces before key
         print(f"{_P}  │{_R}  {label}{_D}:{_R} {val}{' ' * max(spaces, 0)}{_P}│{_R}")
 
     print(f"{_P}  ╰{'─' * inner}╯{_R}")
