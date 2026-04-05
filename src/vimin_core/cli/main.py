@@ -213,22 +213,23 @@ def _cmd_start_agent(args) -> int:
         openclaw_url=openclaw_url,
     )
 
+    # agent_id is assigned in __init__, so we can print and daemonize
+    # before touching asyncio — forking inside a running event loop is unsafe.
+    fields = [
+        ("Agent ID", agent.agent_id),
+        ("Center",   center_url),
+    ]
+    if openclaw_url:
+        fields.append(("OpenClaw", openclaw_url))
+    _banner("vimin-core  ·  Inference Agent", fields)
+
+    if args.daemon:
+        pid_path = _VIMIN_DIR / f"agent-{agent.agent_id}.pid"
+        log_path = _VIMIN_DIR / "logs" / f"agent-{agent.agent_id}.log"
+        _daemonize(pid_path, log_path)
+
     async def _run():
         await agent.start()
-        fields = [
-            ("Agent ID", agent.agent_id),
-            ("Center",   agent.center_node_url),
-        ]
-        if openclaw_url:
-            fields.append(("OpenClaw", openclaw_url))
-        _banner("vimin-core  ·  Inference Agent", fields)
-
-        if args.daemon:
-            # Agent ID is only known after start(), so write a custom PID file name.
-            pid_path = _VIMIN_DIR / f"agent-{agent.agent_id}.pid"
-            log_path = _VIMIN_DIR / "logs" / f"agent-{agent.agent_id}.log"
-            _daemonize(pid_path, log_path)
-
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
