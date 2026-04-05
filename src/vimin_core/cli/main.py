@@ -241,6 +241,68 @@ def _cmd_start_agent(args) -> int:
     return 0
 
 
+_DEFAULT_MODEL = "mlx-community/Qwen2.5-3B-Instruct-4bit"
+
+
+def _cmd_broadcast(args) -> int:
+    import json
+    import urllib.request
+    import urllib.error
+    from vimin_core.cli.config import ensure_config
+
+    cfg = ensure_config()
+    api_key   = cfg.get("api_key", "")
+    center    = cfg.get("center_url", "http://localhost:8080")
+    model     = args.model or cfg.get("default_model", _DEFAULT_MODEL)
+    max_tok   = args.max_tokens
+
+    payload = json.dumps({
+        "prompt":    args.prompt,
+        "model_id":  model,
+        "max_tokens": max_tok,
+    }).encode()
+
+    req = urllib.request.Request(
+        f"{center}/api/broadcast",
+        data=payload,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+
+    print(f"\n{_D}  Broadcasting to {center} …{_R}", flush=True)
+
+    try:
+        with urllib.request.urlopen(req, timeout=310) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.URLError as e:
+        print(f"\n  {_P}ERROR{_R}: Could not reach center at {center}: {e.reason}\n"
+              f"  Is the center running?  {_W}vimin-core start-center --daemon{_R}\n")
+        return 1
+    except Exception as e:
+        print(f"\n  {_P}ERROR{_R}: {e}\n")
+        return 1
+
+    results = data.get("results", [])
+    if not results:
+        print(f"\n  {_P}No results returned.{_R} Are any agents connected?\n"
+              f"  Start one with  {_W}vimin-core start-agent --daemon{_R}\n")
+        return 1
+
+    for r in results:
+        agent_id = r.get("agent_id", "unknown")[:8]
+        latency  = r.get("latency_ms") or 0
+        output   = r.get("output")
+        error    = r.get("error")
+        print(f"\n{_P}  ── agent {agent_id}{_R}  {_D}({latency:.0f} ms){_R}")
+        if error:
+            print(f"  {_P}timeout / error:{_R} {error}")
+        else:
+            for line in (output or "").strip().splitlines():
+                print(f"  {line}")
+    print()
+    return 0
+
+
 def _cmd_stop_center(_args) -> int:
     return _stop(_CENTER_PID, "center")
 
@@ -281,6 +343,12 @@ def main():
     sa.add_argument("--openclaw-url", default=None,
                     help="OpenClaw Gateway URL (default: http://127.0.0.1:18789)")
 
+    # broadcast
+    bc = sub.add_parser("broadcast", help="Send a prompt to all connected agents")
+    bc.add_argument("prompt", help="The prompt to broadcast")
+    bc.add_argument("--model", default=None, help=f"Model ID (default: {_DEFAULT_MODEL})")
+    bc.add_argument("--max-tokens", type=int, default=300, dest="max_tokens")
+
     # stop-center / stop-agent
     sub.add_parser("stop-center", help="Stop a daemonized center node")
     sub.add_parser("stop-agent",  help="Stop all daemonized agent nodes")
@@ -291,6 +359,8 @@ def main():
         return _cmd_start_center(args)
     elif args.command == "start-agent":
         return _cmd_start_agent(args)
+    elif args.command == "broadcast":
+        return _cmd_broadcast(args)
     elif args.command == "stop-center":
         return _cmd_stop_center(args)
     elif args.command == "stop-agent":
