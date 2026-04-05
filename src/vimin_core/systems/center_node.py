@@ -574,7 +574,7 @@ class CenterNode:
             # Wait for all task results so callers get inline results (like the
             # README documents).  Callers can opt out with ?wait=false.
             wait = str(request.rel_url.query.get("wait", "true")).lower() != "false"
-            timeout_s = float(request.rel_url.query.get("timeout", "120"))
+            timeout_s = float(request.rel_url.query.get("timeout", "300"))
 
             if not wait:
                 return web.json_response({

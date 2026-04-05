@@ -31,16 +31,8 @@ try:
 except ImportError:
     ZEROCONF_AVAILABLE = False
 
-try:
-    from vimin_core.hardware.telemetry import TelemetryCollector
-except ImportError:
-    from hardware.telemetry import TelemetryCollector
-
-# Import task-related classes
-try:
-    from vimin_core.core.task import Task, TaskType, TaskComplexity
-except ImportError:
-    from core.task import Task, TaskType, TaskComplexity
+from vimin_core.hardware.telemetry import TelemetryCollector
+from vimin_core.core.task import Task, TaskType, TaskComplexity
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +82,7 @@ class UserAgent:
     User Agent - Manages local NPU orchestration and communicates with center node
     """
 
-    def __init__(self, center_node_url: str = "http://localhost:8080", agent_id: Optional[str] = None, api_key: Optional[str] = None, privacy_mode: bool = False, tls_ca: Optional[str] = None, tls_verify: bool = True, fleet_token: Optional[str] = None):
+    def __init__(self, center_node_url: str = "http://localhost:8080", agent_id: Optional[str] = None, api_key: Optional[str] = None, privacy_mode: bool = False, tls_ca: Optional[str] = None, tls_verify: bool = True, fleet_token: Optional[str] = None, openclaw_url: Optional[str] = None):
         # VIMIN_CENTER_URL env var overrides the default so agents can target a
         # publicly-deployed center node without any code changes.
         self.center_node_url = os.environ.get("VIMIN_CENTER_URL", center_node_url)
@@ -100,12 +92,18 @@ class UserAgent:
         self.tls_ca = tls_ca
         self.tls_verify = tls_verify
         self.fleet_token = fleet_token or os.environ.get("VIMIN_FLEET_TOKEN")
+        self.openclaw_url = openclaw_url or os.environ.get("OPENCLAW_URL")
+        if self.openclaw_url:
+            os.environ["OPENCLAW_URL"] = self.openclaw_url
         self.session = None
         self.heartbeat_task = None
         self.metrics_task = None
         self.commands_task = None
         self.running = False
         self.on_command = None  # Callback for commands: async def (command_type, data)
+        # Inference lock: MLX (and most backends) are not thread-safe — only one
+        # inference may run at a time per agent process.
+        self._inference_lock = asyncio.Lock()
 
         # Core components
         self.orchestrator = None
@@ -540,6 +538,8 @@ class UserAgent:
     async def _load_model_async(self, model_id: str) -> bool:
         """Load a generative model in the background without blocking the event loop."""
         logger.info(f"Loading generative model: {model_id}")
+        print(f"[vimin] Loading model: {model_id} — this may take a minute on first use ...", flush=True)
+        t0 = time.time()
         try:
             loop = asyncio.get_event_loop()
             ok = await loop.run_in_executor(
@@ -547,12 +547,16 @@ class UserAgent:
             )
             if ok:
                 self._loaded_model_id = model_id
+                elapsed = time.time() - t0
                 logger.info(f"Model loaded successfully: {model_id}")
+                print(f"[vimin] Model ready: {model_id} ({elapsed:.1f}s)", flush=True)
             else:
                 logger.warning(f"Model load returned False: {model_id}")
+                print(f"[vimin] WARNING: model load returned False for {model_id}", flush=True)
             return ok
         except Exception as exc:
             logger.error(f"Model load failed for '{model_id}': {exc}")
+            print(f"[vimin] ERROR: model load failed for '{model_id}': {exc}", flush=True)
             return False
 
     async def _run_task_with_model(self, task: Task, model_id: str) -> None:
@@ -561,6 +565,7 @@ class UserAgent:
             loaded = await self._load_model_async(model_id)
             if not loaded:
                 logger.error(f"Cannot execute task {task.id}: model '{model_id}' failed to load")
+                print(f"[vimin] ERROR: cannot run task {task.id} — model failed to load", flush=True)
                 return
         await self.execute_task(task)
 
@@ -679,6 +684,7 @@ class UserAgent:
             if hasattr(task, "type") and hasattr(task.type, "value")
             else str(getattr(task, "type", "unknown"))
         )
+        print(f"[vimin] Task received: {task_id} — running inference ...", flush=True)
 
         try:
             if self.orchestrator:
@@ -694,27 +700,29 @@ class UserAgent:
                 if use_streaming:
                     # --------------------------------------------------------
                     # Streaming path: yield tokens to center node as they arrive
+                    # Lock ensures only one inference uses the backend at a time.
                     # --------------------------------------------------------
                     output_chunks: list[str] = []
                     buffer: list[str] = []
                     _BATCH_TOKENS = 8  # POST every N tokens for low latency
 
-                    for token in self.orchestrator.stream_execute_task(task):
-                        buffer.append(token)
-                        output_chunks.append(token)
-                        if len(buffer) >= _BATCH_TOKENS:
-                            await self._report_partial_result(
-                                task_id, "".join(buffer), len("".join(output_chunks))
-                            )
-                            buffer = []
+                    async with self._inference_lock:
+                        for token in self.orchestrator.stream_execute_task(task):
+                            buffer.append(token)
+                            output_chunks.append(token)
+                            if len(buffer) >= _BATCH_TOKENS:
+                                await self._report_partial_result(
+                                    task_id, "".join(buffer), len("".join(output_chunks))
+                                )
+                                buffer = []
 
-                    # Flush remaining tokens as final chunk
-                    await self._report_partial_result(
-                        task_id,
-                        "".join(buffer),
-                        len("".join(output_chunks)),
-                        final=True,
-                    )
+                        # Flush remaining tokens as final chunk
+                        await self._report_partial_result(
+                            task_id,
+                            "".join(buffer),
+                            len("".join(output_chunks)),
+                            final=True,
+                        )
 
                     output = "".join(output_chunks)
                     success = True
@@ -723,8 +731,13 @@ class UserAgent:
                 else:
                     # --------------------------------------------------------
                     # Standard blocking path (ONNX encoder or no stream flag)
+                    # Run in a thread pool so the event loop stays alive for
+                    # heartbeats and command polling during long inference.
+                    # The lock ensures only one thread uses the backend at a
+                    # time (MLX / Metal are not concurrent-thread-safe).
                     # --------------------------------------------------------
-                    result = self.orchestrator.execute_task(task)
+                    async with self._inference_lock:
+                        result = await asyncio.to_thread(self.orchestrator.execute_task, task)
                     success = result.success if hasattr(result, "success") else True
                     output = (
                         result.result
@@ -746,6 +759,7 @@ class UserAgent:
                 execution_target = "demo"
 
             execution_time = time.time() - start_time
+            print(f"[vimin] Inference complete: {task_id} ({execution_time:.1f}s) — sending result to center ...", flush=True)
 
             task_record = {
                 "task_id": task_id,
@@ -771,6 +785,7 @@ class UserAgent:
 
         except Exception as exc:
             logger.error(f"Task {task_id} execution failed: {exc}")
+            print(f"[vimin] ERROR: task {task_id} failed — {exc}", flush=True)
             return {
                 "success": False,
                 "error": str(exc),
