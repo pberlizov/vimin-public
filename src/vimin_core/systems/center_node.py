@@ -895,7 +895,13 @@ class CenterNode:
         auth = self._authenticate(request)
         if not auth:
             return _err("unauthorized", "Valid API key required.", 401)
-        return web.json_response({"tasks": self.task_queue})
+        # Merge pending queue + completed history, newest first
+        combined = list(self.task_queue) + list(self.task_history)
+        combined.sort(
+            key=lambda t: t.get("submitted_at") or t.get("timestamp") or "",
+            reverse=True,
+        )
+        return web.json_response({"tasks": combined}, dumps=_dumps)
 
     async def _get_task(self, request):
         auth = self._authenticate(request)

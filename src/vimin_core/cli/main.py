@@ -72,6 +72,58 @@ def _banner(title: str, fields: list[tuple[str, str]], width: int = 62) -> None:
     print()
 
 
+def _port_in_use(host: str, port: int) -> bool:
+    """Return True if *port* is already bound on *host*."""
+    import socket
+    # Normalise wildcard binds — we want to probe localhost
+    probe = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        return s.connect_ex((probe, port)) == 0
+
+
+def _check_already_running(pid_path: Path, host: str, port: int, name: str) -> bool:
+    """
+    Return True (and print a clear error) if a *name* process is already running.
+
+    Checks two independent signals:
+      1. A live PID file pointing to a running process.
+      2. The target port is already accepting connections.
+
+    Either signal is sufficient — a zombie process with a stale PID file but
+    an open port (or vice-versa) is caught by the other check.
+    """
+    pid_alive = False
+    if pid_path.exists():
+        try:
+            pid = int(pid_path.read_text().strip())
+            os.kill(pid, 0)   # raises ProcessLookupError if dead
+            pid_alive = True
+            print(
+                f"\n  {_P}ERROR{_R}: A {name} is already running (PID {pid}).\n"
+                f"  Stop it first:  {_W}vimin-core stop-{name.replace(' ', '-')}{_R}\n"
+            )
+        except (ProcessLookupError, ValueError):
+            pid_path.unlink(missing_ok=True)   # stale — clean up
+
+    if not pid_alive and _port_in_use(host, port):
+        # Port occupied but no PID file — zombie from a previous session
+        import subprocess as _sp
+        try:
+            pids = _sp.check_output(
+                ["lsof", "-ti", f":{port}"], text=True
+            ).strip()
+        except Exception:
+            pids = "unknown"
+        print(
+            f"\n  {_P}ERROR{_R}: Port {port} is already in use by another process (PID {pids}).\n"
+            f"  Kill it first:  {_W}kill {pids}{_R}  then re-run.\n"
+        )
+        return True
+
+    return pid_alive
+
+
 def _daemonize(cmd: list, pid_path: Path, log_path: Path) -> None:
     """
     Spawn a background subprocess and record its PID.
@@ -179,6 +231,8 @@ def _cmd_start_center(args) -> int:
     )
 
     if not args.foreground:
+        if _check_already_running(_CENTER_PID, args.host, args.port, "center"):
+            return 1
         cmd = sys.argv + ["--foreground"]   # subprocess must NOT re-daemonize
         _daemonize(cmd, _CENTER_PID, _CENTER_LOG)
         print(f"  {_D}Outputs dir:  {_W}{_VIMIN_DIR / 'outputs'}{_R}")
@@ -376,11 +430,16 @@ def _cmd_broadcast(args) -> int:
               f"  Start one with  {_W}vimin-core start-agent{_R}\n")
         return 1
 
+    # Only save to disk if at least one result has real output (not just queued/in-progress)
+    has_real_output = any(
+        not r.get("queued") and not r.get("in_progress")
+        for r in results
+    )
     _outputs_dir = _VIMIN_DIR / "outputs"
     if args.output:
         saved = _write_output(args.output, data)
         print(f"  {_D}Response saved to  {_W}{saved}{_R}")
-    elif mode == "return":
+    elif mode == "return" and has_real_output:
         ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
         auto_path = _outputs_dir / f"broadcast-{ts}.json"
         saved = _write_output(str(auto_path), data)
