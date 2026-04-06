@@ -22,6 +22,7 @@ _DEFAULTS = {
     "center_url": "http://localhost:8080",
     "fleet_token": None,   # generated on first run
     "api_key": None,       # generated on first run
+    "agent_id": None,      # generated on first run, persisted so queued tasks survive restarts
 }
 
 
@@ -61,7 +62,9 @@ def load_config() -> dict:
 def save_config(cfg: dict) -> None:
     """Write cfg to ~/.vimin/config.json (creates the directory if needed)."""
     _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _CONFIG_PATH.parent.chmod(0o700)
     _CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
+    _CONFIG_PATH.chmod(0o600)
 
 
 def ensure_config() -> dict:

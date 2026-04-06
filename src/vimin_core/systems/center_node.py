@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from collections import defaultdict, deque
@@ -124,7 +125,7 @@ class CenterNode:
     tag-based routing, fleet pipelines, OpenClaw integration, and more.
     """
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 8080):
+    def __init__(self, host: str = "127.0.0.1", port: int = 8080):
         self.host = host
         self.port = port
         logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
@@ -193,6 +194,8 @@ class CenterNode:
         r.add_post("/api/tasks/{task_id}/stop", self._stop_task)
         # Broadcast dispatch
         r.add_post("/api/broadcast", self._broadcast_task)
+        # Pipeline orchestration
+        r.add_post("/api/pipeline", self._run_pipeline)
         # Metrics & policy
         r.add_get("/api/metrics", self._get_system_metrics)
         r.add_get("/api/policy/data", self._get_data_policy)
@@ -279,7 +282,7 @@ class CenterNode:
         if not auth or not auth.get("is_master"):
             return _err("forbidden", "Master key required.", 403)
         try:
-            data = await request.json()
+            data = json.loads(await request.read())
             new_key = self.security.generate_key(data.get("name", "client"), data.get("role", "agent"))
             return web.json_response({"status": "success", "api_key": new_key})
         except Exception as e:
@@ -315,7 +318,7 @@ class CenterNode:
             return _err("rate_limit_exceeded", "Too many registration attempts.", 429)
 
         try:
-            data = await request.json()
+            data = json.loads(await request.read())
             agent_id = data["agent_id"]
 
             # Fleet token check
@@ -352,7 +355,8 @@ class CenterNode:
             )
             self.agents[agent_id] = agent
             asyncio.create_task(self.db.upsert_agent(agent))
-            logger.info(f"Agent registered: {agent_id} ({len(self.agents)}/{MAX_NODES} nodes)")
+            online_now = sum(1 for a in self.agents.values() if a.status == "online")
+            logger.info(f"Agent registered: {agent_id} ({online_now}/{MAX_NODES} online nodes)")
 
             await self._broadcast_update({"type": "agent_registered", "data": asdict(agent)})
             return web.json_response({"status": "success", "agent_id": agent_id})
@@ -366,12 +370,13 @@ class CenterNode:
         if not auth:
             return _err("unauthorized", "Valid API key required.", 401)
         try:
-            data = await request.json()
+            data = json.loads(await request.read())
             agent_id = data["agent_id"]
             if agent_id in self.agents:
                 agent = self.agents[agent_id]
                 agent.last_heartbeat = data["timestamp"]
-                agent.status = "online"
+                # Allow agents to announce graceful shutdown via status=offline
+                agent.status = data.get("status", "online")
                 if "loaded_model_id" in data:
                     agent.loaded_model_id = data["loaded_model_id"]
                 asyncio.create_task(self.db.update_agent_heartbeat(
@@ -387,7 +392,7 @@ class CenterNode:
         if not auth:
             return _err("unauthorized", "Valid API key required.", 401)
         try:
-            data = await request.json()
+            data = json.loads(await request.read())
             agent_id = data["agent_id"]
             if agent_id in self.agents:
                 history = self.agents[agent_id].metrics_history or []
@@ -446,7 +451,7 @@ class CenterNode:
             return _err("unauthorized", "Valid API key required.", 401)
         agent_id = request.match_info["agent_id"]
         try:
-            data = await request.json()
+            data = json.loads(await request.read())
             model_name = data.get("model")
             if not model_name:
                 return _err("missing_field", "'model' is required", 400)
@@ -472,7 +477,7 @@ class CenterNode:
             return _err("rate_limit_exceeded", f"Max {self._rate_max} submissions per {self._rate_window}s.", 429)
 
         try:
-            data = await request.json()
+            data = json.loads(await request.read())
 
             raw_data = data.get("data", "")
             if isinstance(raw_data, str) and len(raw_data.encode()) > 32_768:
@@ -526,19 +531,42 @@ class CenterNode:
             return _err("rate_limit_exceeded", f"Max {self._rate_max} submissions per {self._rate_window}s.", 429)
 
         try:
-            data = await request.json()
+            data = json.loads(await request.read())
             prompt = data.get("prompt", "").strip()
             if not prompt:
                 return _err("missing_field", "'prompt' is required.", 400)
 
-            online_agents = [aid for aid, a in self.agents.items() if a.status == "online"]
-            if not online_agents:
-                return _err("no_agents", "No online nodes to dispatch to.", 400)
+            # Classify agents into three buckets:
+            #   alive   — status==online AND heartbeated within the last 90s
+            #   offline — explicitly offline (missed heartbeats already detected)
+            #   ghost   — status==online but heartbeat is stale (process probably crashed)
+            # Alive agents get tasks queued and are waited on.
+            # Offline agents get tasks queued (they'll pick them up on reconnect) but
+            # are NOT waited on — the broadcast returns without blocking on them.
+            # Ghost agents are silently excluded.
+            now_dt = datetime.now(timezone.utc)
+            alive_threshold = timedelta(seconds=90)
+            alive_agents: list = []
+            offline_agents: list = []
+            for aid, a in self.agents.items():
+                age = now_dt - parse_iso_timestamp(a.last_heartbeat)
+                if a.status == "online" and age <= alive_threshold:
+                    alive_agents.append(aid)
+                elif a.status == "offline":
+                    offline_agents.append(aid)
+                # else: ghost — stale online, skip
+
+            if not alive_agents and not offline_agents:
+                return _err("no_agents", "No nodes to dispatch to.", 400)
 
             broadcast_id = f"bcast_{int(time.time() * 1000)}"
-            task_ids = []
+            task_ids_alive: list = []   # waited on
+            task_ids_offline: list = [] # queued only
 
-            for agent_id in online_agents:
+            mode = data.get("mode", "return")   # "return" | "broadcast"
+            save_local = (mode == "broadcast")
+
+            for agent_id in alive_agents + offline_agents:
                 task_id = f"{broadcast_id}_{agent_id[:8]}"
                 task = {
                     "id": task_id,
@@ -547,12 +575,13 @@ class CenterNode:
                     "complexity": "medium",
                     "model_id": data.get("model_id"),
                     "metadata": {
-                        k: v for k, v in data.items()
-                        if k in ("max_tokens", "temperature", "stream")
+                        **{k: v for k, v in data.items()
+                           if k in ("max_tokens", "temperature", "stream")},
+                        **({"save_local": True} if save_local else {}),
                     },
                     "submitted_by": auth.get("name"),
                     "submitted_at": get_utc_iso(),
-                    "status": "assigned",
+                    "status": "assigned" if agent_id in alive_agents else "queued",
                     "assigned_agent": agent_id,
                     "broadcast_id": broadcast_id,
                 }
@@ -562,66 +591,97 @@ class CenterNode:
                     "task": task,
                     "data_policy": self._data_policy,
                 })
-                task_ids.append(task_id)
+                if agent_id in alive_agents:
+                    task_ids_alive.append(task_id)
+                else:
+                    task_ids_offline.append(task_id)
+
+            all_task_ids = task_ids_alive + task_ids_offline
 
             await self._broadcast_update({
                 "type": "broadcast_dispatched",
-                "data": {"broadcast_id": broadcast_id, "task_ids": task_ids, "node_count": len(online_agents)},
+                "data": {
+                    "broadcast_id": broadcast_id,
+                    "task_ids": all_task_ids,
+                    "node_count": len(alive_agents),
+                    "queued_count": len(offline_agents),
+                },
             })
 
-            logger.info(f"Broadcast {broadcast_id} dispatched to {len(online_agents)} nodes")
+            logger.info(
+                f"Broadcast {broadcast_id} dispatched to {len(alive_agents)} live node(s), "
+                f"{len(offline_agents)} queued for offline node(s)"
+            )
 
-            # Wait for all task results so callers get inline results (like the
-            # README documents).  Callers can opt out with ?wait=false.
+            # Determine how long to wait for alive agents to respond.
+            # Priority: request body "timeout" > query param "timeout" > default 60s.
+            # Offline agents are never waited on — their tasks are queued and will be
+            # picked up when they reconnect.  Alive agents that don't respond within
+            # the timeout are returned as "in_progress" (not "timeout") because the
+            # task is still running on the agent; it just won't come back to this
+            # particular CLI call.  The result is stored in task_history when done.
             wait = str(request.rel_url.query.get("wait", "true")).lower() != "false"
-            timeout_s = float(request.rel_url.query.get("timeout", "300"))
+            timeout_s = float(
+                data.get("timeout")
+                or request.rel_url.query.get("timeout")
+                or 60
+            )
 
             if not wait:
                 return web.json_response({
                     "status": "success",
                     "broadcast_id": broadcast_id,
-                    "task_ids": task_ids,
-                    "dispatched_to": len(online_agents),
+                    "task_ids": all_task_ids,
+                    "dispatched_to": len(alive_agents),
+                    "queued_for": len(offline_agents),
                 })
 
-            # Poll until all tasks report completion or timeout expires.
+            # Poll until all live tasks report completion or the timeout fires.
             deadline = time.time() + timeout_s
             while time.time() < deadline:
-                if all(tid in self._task_results for tid in task_ids):
+                if all(tid in self._task_results for tid in task_ids_alive):
                     break
                 await asyncio.sleep(0.25)
 
-            results = []
-            for tid in task_ids:
+            def _build_result(tid, agent_id_hint):
                 result_payload = self._task_results.get(tid)
-                # Look up agent_id from the task record we built earlier
                 agent_id_for_task = next(
                     (t.get("assigned_agent") for t in self.task_queue if t.get("id") == tid),
                     None,
+                ) or next(
+                    (t.get("agent_id") for t in self.task_history
+                     if (t.get("task_id") or t.get("id")) == tid),
+                    agent_id_hint,
                 )
-                # Also check task_history (task may have been removed from queue)
-                if not agent_id_for_task:
-                    agent_id_for_task = next(
-                        (t.get("agent_id") for t in self.task_history
-                         if (t.get("task_id") or t.get("id")) == tid),
-                        tid[:8],
-                    )
-                if result_payload is not None:
-                    results.append({
-                        "agent_id": agent_id_for_task,
-                        "output": result_payload,
-                        "latency_ms": next(
-                            (t.get("execution_time_ms", 0) for t in self.task_history
-                             if (t.get("task_id") or t.get("id")) == tid),
-                            0,
-                        ),
-                    })
-                else:
-                    results.append({
+                latency_ms = next(
+                    (t.get("execution_time_ms", 0) for t in self.task_history
+                     if (t.get("task_id") or t.get("id")) == tid),
+                    0,
+                )
+                if result_payload is None:
+                    # Task was dispatched to a live agent but hasn't completed yet.
+                    # Return in_progress so the caller knows the task IS running —
+                    # the result will appear in task history when the agent finishes.
+                    return {
                         "agent_id": agent_id_for_task,
                         "output": None,
-                        "error": "timeout",
-                    })
+                        "in_progress": True,
+                        "note": "task is running on agent — result will be stored in task history",
+                    }
+                if isinstance(result_payload, str) and result_payload.startswith("[error] "):
+                    return {"agent_id": agent_id_for_task, "output": None,
+                            "error": result_payload[8:], "latency_ms": latency_ms}
+                return {"agent_id": agent_id_for_task, "output": result_payload, "latency_ms": latency_ms}
+
+            results = [_build_result(tid, tid[:8]) for tid in task_ids_alive]
+            # Offline agents are queued, never timed out.
+            for tid, agent_id in zip(task_ids_offline, offline_agents):
+                results.append({
+                    "agent_id": agent_id,
+                    "output": None,
+                    "queued": True,
+                    "note": "offline — task queued, will execute on reconnect",
+                })
 
             return web.json_response({
                 "status": "success",
@@ -632,6 +692,204 @@ class CenterNode:
         except Exception as e:
             logger.error(f"Broadcast error: {e}")
             return _err("internal_error", "An internal error occurred.", 500)
+
+    # ------------------------------------------------------------------
+    # Pipeline orchestration
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _substitute_templates(text: str, outputs: Dict[str, str]) -> str:
+        """Replace {{stepN_output}} and {{input}} placeholders with actual values."""
+        return re.sub(
+            r"\{\{(\w+)\}\}",
+            lambda m: outputs.get(m.group(1), m.group(0)),
+            text,
+        )
+
+    async def _dispatch_pipeline_step(
+        self,
+        pipeline_id: str,
+        step_label: str,
+        step_spec: Dict[str, Any],
+        resolved_data: str,
+        default_model: Optional[str],
+        agent_id: str,
+        save_local: bool = False,
+    ) -> Dict[str, Any]:
+        """Push one step to a single agent and wait for its result."""
+        task_id = f"{pipeline_id}_{step_label}_{agent_id[:8]}"
+        task = {
+            "id": task_id,
+            "type": step_spec.get("type", TaskType.TEXT_GENERATION.value),
+            "data": resolved_data,
+            "complexity": step_spec.get("complexity", "medium"),
+            "model_id": step_spec.get("model_id") or default_model,
+            "metadata": {
+                **step_spec.get("metadata", {}),
+                **({"save_local": True} if save_local else {}),
+            },
+            "submitted_by": "pipeline",
+            "submitted_at": get_utc_iso(),
+            "status": "assigned",
+            "assigned_agent": agent_id,
+            "pipeline_id": pipeline_id,
+        }
+        self.task_queue.append(task)
+        self._pending_commands.setdefault(agent_id, []).append({
+            "type": "run_task",
+            "task": task,
+            "data_policy": self._data_policy,
+        })
+
+        timeout_s = float(step_spec.get("timeout", 300))
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            if task_id in self._task_results:
+                break
+            await asyncio.sleep(0.25)
+
+        payload = self._task_results.get(task_id)
+        if payload is None:
+            return {"agent_id": agent_id, "output": None, "error": "timeout"}
+        if isinstance(payload, str) and payload.startswith("[error] "):
+            return {"agent_id": agent_id, "output": None, "error": payload[8:]}
+        return {"agent_id": agent_id, "output": payload}
+
+    async def _run_pipeline(self, request):
+        """
+        Execute a multi-step pipeline on the fleet.
+
+        Each step runs sequentially on a single chosen agent. Output from step N
+        is available as ``{{stepN_output}}`` in any later step's data field.
+        An optional ``{{input}}`` placeholder is replaced with the top-level
+        ``input`` field (useful for feeding a document into every step).
+
+        Parallel step groups are expressed as a JSON array inside the steps array.
+        Each sub-step in the group runs concurrently on a different agent (or the
+        same one if fewer agents are available). Their outputs are joined with
+        ``---`` and stored as ``{{stepN_output}}``.
+
+        Body:
+          {
+            "steps": [ <step> | [<step>, ...], ... ],
+            "model_id": "mlx-community/...",   // optional default
+            "input": "document text …",        // optional, replaces {{input}}
+            "name": "my pipeline"              // optional label
+          }
+
+        Step schema:
+          {
+            "type": "TEXT_GENERATION",   // TaskType value
+            "data": "Summarise: {{input}}",
+            "model_id": "…",             // overrides top-level default
+            "complexity": "medium",
+            "metadata": { "max_tokens": 400 },
+            "timeout": 300
+          }
+        """
+        auth = self._authenticate(request)
+        if not auth:
+            return _err("unauthorized", "Valid API key required.", 401)
+
+        try:
+            body = json.loads(await request.read())
+        except Exception:
+            return _err("invalid_json", "Request body must be valid JSON.", 400)
+
+        steps = body.get("steps")
+        if not steps or not isinstance(steps, list):
+            return _err("missing_field", "'steps' must be a non-empty array.", 400)
+
+        # Alive agents only (heartbeat within last 90 s)
+        now_dt = datetime.now(timezone.utc)
+        alive_threshold = timedelta(seconds=90)
+        alive_agents = [
+            aid for aid, a in self.agents.items()
+            if a.status == "online"
+            and (now_dt - parse_iso_timestamp(a.last_heartbeat)) <= alive_threshold
+        ]
+        if not alive_agents:
+            return _err("no_agents", "No live nodes available.", 400)
+
+        default_model  = body.get("model_id")
+        pipeline_input = body.get("input", "")
+        pipeline_name  = body.get("name", "pipeline")
+        pipeline_id    = f"pipe_{int(time.time() * 1000)}"
+        save_local     = body.get("mode", "return") == "broadcast"
+
+        # Seed substitution map with the top-level input
+        outputs: Dict[str, str] = {"input": pipeline_input}
+        step_results = []
+
+        logger.info(f"Pipeline {pipeline_id} ({pipeline_name}) starting — "
+                    f"{len(steps)} step(s), {len(alive_agents)} node(s)")
+
+        try:
+            for step_idx, step_spec in enumerate(steps):
+                step_num = step_idx + 1
+
+                if isinstance(step_spec, list):
+                    # ── Parallel group ──────────────────────────────────────
+                    group_results = []
+                    for sub_idx, sub_spec in enumerate(step_spec):
+                        agent_id = alive_agents[sub_idx % len(alive_agents)]
+                        resolved = self._substitute_templates(
+                            sub_spec.get("data", ""), outputs
+                        )
+                        result = await self._dispatch_pipeline_step(
+                            pipeline_id, f"s{step_num}p{sub_idx}", sub_spec,
+                            resolved, default_model, agent_id,
+                            save_local=save_local,
+                        )
+                        group_results.append(result)
+
+                    outputs[f"step{step_num}_output"] = "\n---\n".join(
+                        r["output"] for r in group_results
+                        if r.get("output") and not str(r.get("output", "")).startswith("[saved_locally]")
+                    )
+                    step_results.append({
+                        "step": step_num, "parallel": True,
+                        "results": group_results,
+                        "output": outputs[f"step{step_num}_output"],
+                    })
+
+                else:
+                    # ── Sequential step ────────────────────────────────────
+                    agent_id = alive_agents[0]
+                    resolved = self._substitute_templates(
+                        step_spec.get("data", ""), outputs
+                    )
+                    result = await self._dispatch_pipeline_step(
+                        pipeline_id, f"s{step_num}", step_spec,
+                        resolved, default_model, agent_id,
+                        save_local=save_local,
+                    )
+                    raw_out = result.get("output") or ""
+                    # In broadcast mode the result is a file path ref — don't
+                    # forward "[saved_locally] /path" as text into the next step.
+                    outputs[f"step{step_num}_output"] = (
+                        "" if str(raw_out).startswith("[saved_locally]") else raw_out
+                    )
+                    step_results.append({
+                        "step": step_num, "parallel": False,
+                        "results": [result],
+                        "output": raw_out,
+                    })
+
+                logger.info(f"Pipeline {pipeline_id} step {step_num}/{len(steps)} complete")
+
+        except Exception as e:
+            logger.error(f"Pipeline {pipeline_id} error at step {step_num}: {e}")
+            return _err("pipeline_error", f"Step {step_num} failed: {e}", 500)
+
+        final_output = outputs.get(f"step{len(steps)}_output", "")
+        return web.json_response({
+            "status": "success",
+            "pipeline_id": pipeline_id,
+            "name": pipeline_name,
+            "steps": step_results,
+            "final_output": final_output,
+        })
 
     async def _get_tasks(self, request):
         auth = self._authenticate(request)
@@ -674,7 +932,7 @@ class CenterNode:
         if not auth:
             return _err("unauthorized", "Valid API key required.", 401)
         try:
-            data = await request.json()
+            data = json.loads(await request.read())
             agent_id = data["agent_id"]
             record = data["task_record"]
 
@@ -690,13 +948,18 @@ class CenterNode:
                 record["agent_id"] = agent_id
 
             self.task_history.append(record)
-            if len(self.task_history) > 200:
-                self.task_history.pop(0)
             asyncio.create_task(self.db.save_task_history(record))
 
             task_id = record.get("task_id") or record.get("id", "")
-            if task_id and record.get("result"):
-                self._task_results[task_id] = record["result"]
+            if task_id:
+                # If the task failed and carries an error message, surface it.
+                # Otherwise store whatever result we got (including empty string
+                # for a successful-but-empty model output).
+                if not record.get("success", True) and record.get("error"):
+                    self._task_results[task_id] = f"[error] {record['error']}"
+                else:
+                    self._task_results[task_id] = record.get("result", "")
+                logger.debug(f"Task {task_id} result stored: {str(self._task_results[task_id])[:120]!r}")
             self.task_queue = [t for t in self.task_queue if t.get("id") != task_id]
 
             try:
@@ -713,8 +976,10 @@ class CenterNode:
             return _err("internal_error", "An internal error occurred.", 500)
 
     async def _handle_task_stream(self, request):
+        if not self._authenticate(request):
+            return _err("unauthorized", "Valid API key required.", 401)
         try:
-            data = await request.json()
+            data = json.loads(await request.read())
             await self._broadcast_update({
                 "type": "task_stream",
                 "agent_id": data.get("agent_id"),
@@ -731,6 +996,8 @@ class CenterNode:
     # ------------------------------------------------------------------
 
     async def _get_system_metrics(self, request):
+        if not self._authenticate(request):
+            return _err("unauthorized", "Valid API key required.", 401)
         metrics = self._calculate_system_metrics()
         return web.json_response(asdict(metrics))
 
@@ -766,7 +1033,7 @@ class CenterNode:
         if not auth or not auth.get("is_master"):
             return _err("forbidden", "Master key required.", 403)
         try:
-            data = await request.json()
+            data = json.loads(await request.read())
         except Exception:
             return _err("invalid_request", "Request body must be valid JSON.", 400)
         blocked = data.get("blocked_fields", [])
@@ -975,13 +1242,25 @@ ws.onmessage = e => {
         while True:
             try:
                 now = datetime.now(timezone.utc)
-                timeout = timedelta(minutes=2)
-                for agent_id, agent in self.agents.items():
-                    if agent.status == "online":
-                        if now - parse_iso_timestamp(agent.last_heartbeat) > timeout:
-                            agent.status = "offline"
-                            logger.info(f"Agent {agent_id} marked offline (missed heartbeats)")
-                            await self._broadcast_update({"type": "agent_offline", "data": {"agent_id": agent_id}})
+                ghost_timeout = timedelta(minutes=2)
+                purge_timeout = timedelta(minutes=10)
+
+                to_purge = []
+                for agent_id, agent in list(self.agents.items()):
+                    age = now - parse_iso_timestamp(agent.last_heartbeat)
+                    if agent.status == "online" and age > ghost_timeout:
+                        agent.status = "offline"
+                        logger.info(f"Agent {agent_id} marked offline (missed heartbeats)")
+                        await self._broadcast_update({"type": "agent_offline", "data": {"agent_id": agent_id}})
+                    elif agent.status == "offline" and age > purge_timeout:
+                        to_purge.append(agent_id)
+
+                for agent_id in to_purge:
+                    del self.agents[agent_id]
+                    self._pending_commands.pop(agent_id, None)
+                    logger.info(f"Purged stale agent {agent_id} (offline >10 min)")
+                    await self._broadcast_update({"type": "agent_purged", "data": {"agent_id": agent_id}})
+
             except Exception as e:
                 logger.error(f"Cleanup loop error: {e}")
             await asyncio.sleep(30)
@@ -1012,9 +1291,22 @@ ws.onmessage = e => {
             # receiving broadcast tasks after a center node restart.
             for agent in self.agents.values():
                 agent.status = "offline"
+            # Rebuild _pending_commands for tasks that were queued for specific agents
+            # before the center restarted. When those agents reconnect they will poll
+            # and receive their pending work automatically.
+            for task in self.task_queue:
+                aid = task.get("assigned_agent")
+                if aid and task.get("status") == "queued":
+                    self._pending_commands.setdefault(aid, []).append({
+                        "type": "run_task",
+                        "task": task,
+                        "data_policy": self._data_policy,
+                    })
+            queued_count = sum(len(v) for v in self._pending_commands.values())
             logger.info(
                 f"Restored {len(self.agents)} agents (all marked offline pending re-registration), "
-                f"{len(self.task_queue)} queued tasks from DB"
+                f"{len(self.task_queue)} queued tasks from DB "
+                f"({queued_count} pending commands rebuilt)"
             )
         except Exception as e:
             logger.warning(f"Could not restore state from DB: {e}")

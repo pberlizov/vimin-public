@@ -17,6 +17,30 @@ _R  = "\033[0m"                  # reset
 _LOGO = f"{_P}  ◈ {_W}vimin{_R}{_D}-core{_R}"
 
 _VIMIN_DIR = Path.home() / ".vimin"
+
+
+def _write_output(path_str: str, data: dict) -> Path:
+    """Write *data* as JSON to *path_str*, creating parent dirs as needed.
+    If the file already exists and contains a JSON array, the new record is
+    appended. If it contains a single object, both are wrapped in an array.
+    Returns the resolved path."""
+    import json as _json
+    p = Path(path_str).expanduser().resolve()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    if p.exists():
+        try:
+            existing = _json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            existing = None
+        if isinstance(existing, list):
+            existing.append(data)
+            p.write_text(_json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8")
+        else:
+            records = [existing, data] if existing is not None else [data]
+            p.write_text(_json.dumps(records, indent=2, ensure_ascii=False), encoding="utf-8")
+    else:
+        p.write_text(_json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    return p
 _CENTER_PID = _VIMIN_DIR / "center.pid"
 _CENTER_LOG = _VIMIN_DIR / "logs" / "center.log"
 _AGENT_PID  = _VIMIN_DIR / "agent.pid"
@@ -48,14 +72,20 @@ def _banner(title: str, fields: list[tuple[str, str]], width: int = 62) -> None:
     print()
 
 
-def _daemonize(pid_path: Path, log_path: Path) -> None:
+def _daemonize(cmd: list, pid_path: Path, log_path: Path) -> None:
     """
-    Double-fork daemonization (Unix only).
-    The banner must be printed BEFORE calling this.
-    The parent process waits for the daemon to write its PID file,
-    prints confirmation, then exits. The daemon continues running.
+    Spawn a background subprocess and record its PID.
+
+    Uses subprocess.Popen with start_new_session=True instead of os.fork().
+    On macOS, fork()-without-exec() is unsafe when Apple frameworks
+    (Metal, CoreML, Foundation) are in use — the ObjC runtime detects the
+    forked child and crashes it the moment it touches any ObjC class.
+    A fresh subprocess avoids this entirely.
+
+    The caller must add --foreground to `cmd` so the subprocess runs in foreground
+    and does not re-daemonize (which would recurse infinitely).
     """
-    import time, errno as _errno
+    import subprocess
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -63,49 +93,28 @@ def _daemonize(pid_path: Path, log_path: Path) -> None:
     except FileNotFoundError:
         pass
 
-    try:
-        pid = os.fork()
-    except AttributeError:
-        print(f"  {_P}ERROR{_R}: --daemon is not supported on this platform.\n")
-        sys.exit(1)
+    with open(log_path, "a") as log_fd:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=log_fd,
+            stderr=log_fd,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,   # detach from terminal / create new session
+            close_fds=True,
+        )
 
-    if pid > 0:
-        # Original process: wait for daemon to write PID file, then exit.
-        for _ in range(40):   # up to 4 seconds
-            time.sleep(0.1)
-            if pid_path.exists():
-                daemon_pid = pid_path.read_text().strip()
-                print(f"  {_D}Running in background.{_R}")
-                print(f"  PID  {_W}{daemon_pid}{_R}   |   Logs  {_W}{log_path}{_R}")
-                print(f"  Stop with  {_W}vimin-core stop-center{_R}\n"
-                      if "center" in str(pid_path) else
-                      f"  Stop with  {_W}vimin-core stop-agent{_R}\n")
-                os._exit(0)
-        print(f"  {_P}WARNING{_R}: daemon may not have started. Check {log_path}\n")
-        os._exit(1)
-
-    # Child 1: become session leader, then fork again
-    os.setsid()
-    if os.fork() > 0:
-        os._exit(0)
-
-    # Daemon process: redirect I/O to log file
-    log_fd = open(log_path, "a")
-    os.dup2(log_fd.fileno(), sys.stdout.fileno())
-    os.dup2(log_fd.fileno(), sys.stderr.fileno())
-    log_fd.close()
-    devnull = open(os.devnull)
-    os.dup2(devnull.fileno(), sys.stdin.fileno())
-    devnull.close()
-
-    pid_path.write_text(str(os.getpid()))
+    pid_path.write_text(str(proc.pid))
+    stop_cmd = "stop-center" if "center" in str(pid_path) else "stop-agent"
+    print(f"  {_D}Running in background.{_R}")
+    print(f"  PID  {_W}{proc.pid}{_R}   |   Logs  {_W}{log_path}{_R}")
+    print(f"  Stop with  {_W}vimin-core {stop_cmd}{_R}\n")
 
 
 def _stop(pid_path: Path, name: str) -> int:
     import signal, time
     if not pid_path.exists():
         print(f"\n  No {name} PID file found at {pid_path}.")
-        print(f"  It may not be running, or was started without --daemon.\n")
+        print(f"  It may not be running, or was started without this process.\n")
         return 1
     pid = int(pid_path.read_text().strip())
     try:
@@ -139,11 +148,25 @@ def _cmd_start_center(args) -> int:
 
     os.environ.setdefault("VIMIN_FLEET_TOKEN", fleet_token)
     os.environ.setdefault("ORCHESTRATOR_API_KEY", api_key)
-    os.environ.setdefault("ORCHESTRATOR_MASTER_KEY", api_key)
+    # If the user pre-set ORCHESTRATOR_MASTER_KEY, honour it (allows shared
+    # multi-machine secrets). Otherwise fall back to the config api_key so
+    # the displayed key and the validated key are always the same.
+    if not os.environ.get("ORCHESTRATOR_MASTER_KEY"):
+        os.environ["ORCHESTRATOR_MASTER_KEY"] = api_key
 
-    display_host = "localhost" if args.host in ("0.0.0.0", "::") else args.host
+    _loopback = {"127.0.0.1", "::1", "localhost"}
+    _wildcard  = {"0.0.0.0", "::"}
+    display_host = "localhost" if args.host in _loopback | _wildcard else args.host
     cfg["center_url"] = f"http://{display_host}:{args.port}"
     save_config(cfg)
+
+    if args.host not in _loopback:
+        print(
+            f"\n  {_P}⚠  WARNING{_R}  Center is binding to {_W}{args.host}{_R} "
+            f"(reachable from other machines).\n"
+            f"  {_D}Use TLS and a firewall rule to restrict access in production.{_R}\n"
+            f"  {_D}To restrict to this machine only, omit --host (default: 127.0.0.1).{_R}"
+        )
 
     _banner(
         "vimin-core  ·  Center Node",
@@ -155,8 +178,13 @@ def _cmd_start_center(args) -> int:
         ],
     )
 
-    if args.daemon:
-        _daemonize(_CENTER_PID, _CENTER_LOG)
+    if not args.foreground:
+        cmd = sys.argv + ["--foreground"]   # subprocess must NOT re-daemonize
+        _daemonize(cmd, _CENTER_PID, _CENTER_LOG)
+        print(f"  {_D}Outputs dir:  {_W}{_VIMIN_DIR / 'outputs'}{_R}")
+        print(f"  {_D}Watch logs:   {_W}tail -f {_CENTER_LOG}{_R}")
+        print(f"  {_D}Stop:         {_W}vimin-core stop-center{_R}\n")
+        return 0   # parent exits; subprocess runs the server
 
     node = CenterNode(host=args.host, port=args.port)
 
@@ -185,6 +213,7 @@ def _cmd_start_center(args) -> int:
 
 def _cmd_start_agent(args) -> int:
     import logging as _logging
+    import uuid as _uuid
     from vimin_core.cli.config import ensure_config
     from vimin_core.utils.log_config import configure_logging
     from vimin_core.systems.user_agent import UserAgent
@@ -192,7 +221,9 @@ def _cmd_start_agent(args) -> int:
     configure_logging(_logging.DEBUG if args.debug else _logging.INFO)
 
     cfg = ensure_config()
-    api_key = cfg.get("api_key") or os.environ.get("ORCHESTRATOR_API_KEY", "")
+    api_key = (os.environ.get("ORCHESTRATOR_MASTER_KEY")
+               or os.environ.get("ORCHESTRATOR_API_KEY")
+               or cfg.get("api_key", ""))
     fleet_token = cfg.get("fleet_token") or os.environ.get("VIMIN_FLEET_TOKEN", "")
     center_url = args.center or cfg.get("center_url", "http://localhost:8080")
 
@@ -206,34 +237,57 @@ def _cmd_start_agent(args) -> int:
             print("  Ensure OpenClaw is running: openclaw gateway start\n")
             return 1
 
-    agent = UserAgent(
-        center_node_url=center_url,
-        api_key=api_key,
-        fleet_token=fleet_token,
-        openclaw_url=openclaw_url,
-    )
+    # Use the ID passed by a daemon parent, then the persisted config ID,
+    # then mint a fresh one and save it — so the same device always reconnects
+    # with the same agent_id and picks up tasks queued while it was offline.
+    agent_id = getattr(args, "agent_id", None) or cfg.get("agent_id") or str(_uuid.uuid4())
+    if not cfg.get("agent_id"):
+        cfg["agent_id"] = agent_id
+        from vimin_core.cli.config import save_config
+        save_config(cfg)
 
-    # agent_id is assigned in __init__, so we can print and daemonize
-    # before touching asyncio — forking inside a running event loop is unsafe.
     fields = [
-        ("Agent ID", agent.agent_id),
+        ("Agent ID", agent_id),
         ("Center",   center_url),
     ]
     if openclaw_url:
         fields.append(("OpenClaw", openclaw_url))
     _banner("vimin-core  ·  Inference Agent", fields)
 
-    if args.daemon:
-        pid_path = _VIMIN_DIR / f"agent-{agent.agent_id}.pid"
-        log_path = _VIMIN_DIR / "logs" / f"agent-{agent.agent_id}.log"
-        _daemonize(pid_path, log_path)
+    if not args.foreground:
+        pid_path = _VIMIN_DIR / f"agent-{agent_id}.pid"
+        log_path = _VIMIN_DIR / "logs" / f"agent-{agent_id}.log"
+        cmd = sys.argv + ["--foreground", "--agent-id", agent_id]  # subprocess must NOT re-daemonize
+        _daemonize(cmd, pid_path, log_path)
+        print(f"  {_D}Watch logs:   {_W}tail -f {log_path}{_R}")
+        print(f"  {_D}Stop:         {_W}vimin-core stop-agent{_R}\n")
+        return 0   # parent exits; subprocess runs the agent
+
+    agent = UserAgent(
+        center_node_url=center_url,
+        api_key=api_key,
+        fleet_token=fleet_token,
+        openclaw_url=openclaw_url,
+        agent_id=agent_id,
+    )
+
+    default_model = getattr(args, "model", None) or cfg.get("default_model") or _DEFAULT_MODEL
 
     async def _run():
+        import signal as _signal
+        loop = asyncio.get_event_loop()
+        stop_event = asyncio.Event()
+        loop.add_signal_handler(_signal.SIGTERM, stop_event.set)
+        loop.add_signal_handler(_signal.SIGINT,  stop_event.set)
+
         await agent.start()
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            await agent.stop()
+        # Pre-load the default model immediately so the first task
+        # doesn't block on a cold download + load.
+        if agent.orchestrator:
+            asyncio.create_task(agent._load_model_async(default_model))
+
+        await stop_event.wait()
+        await agent.stop()
 
     try:
         asyncio.run(_run())
@@ -251,17 +305,32 @@ def _cmd_broadcast(args) -> int:
     import urllib.error
     from vimin_core.cli.config import ensure_config
 
+    import datetime as _dt
     cfg = ensure_config()
-    api_key   = cfg.get("api_key", "")
+    api_key   = (os.environ.get("ORCHESTRATOR_MASTER_KEY")
+                 or os.environ.get("ORCHESTRATOR_API_KEY")
+                 or cfg.get("api_key", ""))
     center    = cfg.get("center_url", "http://localhost:8080")
     model     = args.model or cfg.get("default_model", _DEFAULT_MODEL)
     max_tok   = args.max_tokens
+    mode      = args.mode or "return"
 
-    payload = json.dumps({
-        "prompt":    args.prompt,
-        "model_id":  model,
+    mode_label = (
+        f"{_W}return{_R} {_D}(results come back to center){_R}"
+        if mode == "return"
+        else f"{_W}broadcast{_R} {_D}(results saved on edge device at ~/.vimin/outputs/){_R}"
+    )
+    print(f"\n{_D}  Mode:{_R}  {mode_label}")
+
+    body: dict = {
+        "prompt":     args.prompt,
+        "model_id":   model,
         "max_tokens": max_tok,
-    }).encode()
+        "mode":       mode,
+    }
+    if args.timeout is not None:
+        body["timeout"] = args.timeout
+    payload = json.dumps(body).encode()
 
     req = urllib.request.Request(
         f"{center}/api/broadcast",
@@ -270,14 +339,32 @@ def _cmd_broadcast(args) -> int:
         method="POST",
     )
 
+    # Give the CLI request a bit more headroom than the server timeout.
+    cli_timeout = (args.timeout or 60) + 15
+
     print(f"\n{_D}  Broadcasting to {center} …{_R}", flush=True)
 
     try:
-        with urllib.request.urlopen(req, timeout=310) as resp:
+        with urllib.request.urlopen(req, timeout=cli_timeout) as resp:
             data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            body = json.loads(e.read())
+            error_code = body.get("error", "")
+            error_msg  = body.get("message", str(e))
+        except Exception:
+            error_code, error_msg = "", str(e)
+        if error_code == "no_agents":
+            print(f"\n  {_P}No agents connected.{_R}\n"
+                  f"  Start one with  {_W}vimin-core start-agent{_R}\n")
+        elif error_code in ("unauthorized", "forbidden"):
+            print(f"\n  {_P}ERROR{_R}: Authentication failed — check your API key.\n")
+        else:
+            print(f"\n  {_P}ERROR{_R}: Center returned HTTP {e.code}: {error_msg}\n")
+        return 1
     except urllib.error.URLError as e:
-        print(f"\n  {_P}ERROR{_R}: Could not reach center at {center}: {e.reason}\n"
-              f"  Is the center running?  {_W}vimin-core start-center --daemon{_R}\n")
+        print(f"\n  {_P}ERROR{_R}: Cannot connect to center at {center}.\n"
+              f"  Start it with  {_W}vimin-core start-center{_R}\n")
         return 1
     except Exception as e:
         print(f"\n  {_P}ERROR{_R}: {e}\n")
@@ -286,21 +373,204 @@ def _cmd_broadcast(args) -> int:
     results = data.get("results", [])
     if not results:
         print(f"\n  {_P}No results returned.{_R} Are any agents connected?\n"
-              f"  Start one with  {_W}vimin-core start-agent --daemon{_R}\n")
+              f"  Start one with  {_W}vimin-core start-agent{_R}\n")
         return 1
 
+    _outputs_dir = _VIMIN_DIR / "outputs"
+    if args.output:
+        saved = _write_output(args.output, data)
+        print(f"  {_D}Response saved to  {_W}{saved}{_R}")
+    elif mode == "return":
+        ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        auto_path = _outputs_dir / f"broadcast-{ts}.json"
+        saved = _write_output(str(auto_path), data)
+        print(f"  {_D}Results auto-saved to  {_W}{saved}{_R}")
+
     for r in results:
-        agent_id = r.get("agent_id", "unknown")[:8]
+        raw_id   = r.get("agent_id") or ""
+        agent_id = raw_id[:8] if raw_id else "unknown"
         latency  = r.get("latency_ms") or 0
-        output   = r.get("output")
-        error    = r.get("error")
-        print(f"\n{_P}  ── agent {agent_id}{_R}  {_D}({latency:.0f} ms){_R}")
-        if error:
-            print(f"  {_P}timeout / error:{_R} {error}")
-        else:
-            for line in (output or "").strip().splitlines():
+        output      = r.get("output")
+        error       = r.get("error")
+        queued      = r.get("queued", False)
+        in_progress = r.get("in_progress", False)
+        if queued:
+            print(f"\n{_D}  ── agent {agent_id}  queued — will run on reconnect{_R}")
+        elif in_progress:
+            print(f"\n{_D}  ── agent {agent_id}  running — result stored in task history when done{_R}")
+        elif error:
+            print(f"\n{_P}  ── agent {agent_id}{_R}  {_D}({latency:.0f} ms){_R}")
+            print(f"  {_P}error:{_R} {error}")
+        elif isinstance(output, str) and output.startswith("[saved_locally] "):
+            saved_path = output[16:]
+            print(f"\n{_P}  ── agent {agent_id}{_R}  {_D}({latency:.0f} ms){_R}")
+            print(f"  {_D}saved on edge device:{_R}  {_W}{saved_path}{_R}")
+        elif output:
+            print(f"\n{_P}  ── agent {agent_id}{_R}  {_D}({latency:.0f} ms){_R}")
+            for line in output.strip().splitlines():
                 print(f"  {line}")
+        else:
+            print(f"\n{_P}  ── agent {agent_id}{_R}  {_D}({latency:.0f} ms){_R}")
+            print(f"  {_D}(no output){_R}")
     print()
+    return 0
+
+
+_PRESETS_DIR = Path(__file__).parent.parent.parent.parent / "presets"
+
+
+def _cmd_run_pipeline(args) -> int:
+    import json
+    import urllib.request
+    import urllib.error
+    from vimin_core.cli.config import ensure_config
+
+    import datetime as _dt
+    cfg = ensure_config()
+    api_key = (os.environ.get("ORCHESTRATOR_MASTER_KEY")
+               or os.environ.get("ORCHESTRATOR_API_KEY")
+               or cfg.get("api_key", ""))
+    center  = cfg.get("center_url", "http://localhost:8080")
+    model   = args.model or cfg.get("default_model", _DEFAULT_MODEL)
+
+    # Load pipeline definition
+    pipeline_path = None
+    if args.pipeline:
+        pipeline_path = Path(args.pipeline)
+    elif args.preset:
+        pipeline_path = _PRESETS_DIR / f"{args.preset}.json"
+        if not pipeline_path.exists():
+            available = [p.stem for p in _PRESETS_DIR.glob("*.json")] if _PRESETS_DIR.exists() else []
+            print(f"\n  {_P}ERROR{_R}: Preset '{args.preset}' not found.")
+            if available:
+                print(f"  Available presets: {', '.join(available)}")
+            print(f"  Or use --pipeline <path> to specify a custom pipeline file.\n")
+            return 1
+
+    if not pipeline_path:
+        print(f"\n  {_P}ERROR{_R}: Provide --pipeline <file> or --preset <name>.\n")
+        return 1
+
+    try:
+        pipeline = json.loads(pipeline_path.read_text())
+    except Exception as e:
+        print(f"\n  {_P}ERROR{_R}: Could not read pipeline file: {e}\n")
+        return 1
+
+    # Optionally inject file content (or path for audio) as {{input}}
+    _AUDIO_EXTS = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".opus", ".aac"}
+    if args.file:
+        fp = Path(args.file)
+        if fp.suffix.lower() in _AUDIO_EXTS:
+            # SPEECH_TO_TEXT steps need the file path, not the binary content
+            pipeline["input"] = str(fp.resolve())
+        else:
+            try:
+                pipeline["input"] = fp.read_text()
+            except Exception as e:
+                print(f"\n  {_P}ERROR{_R}: Could not read input file: {e}\n")
+                return 1
+    elif args.input:
+        pipeline["input"] = args.input
+
+    if model:
+        pipeline.setdefault("model_id", model)
+
+    mode = args.mode or "return"
+
+    pipeline["mode"] = mode
+
+    name   = pipeline.get("name", pipeline_path.stem)
+    nsteps = len(pipeline.get("steps", []))
+    mode_label = (
+        f"{_W}return{_R} {_D}(results come back to center){_R}"
+        if mode == "return"
+        else f"{_W}broadcast{_R} {_D}(results saved on edge at ~/.vimin/outputs/){_R}"
+    )
+
+    _banner(
+        f"vimin-core  ·  Pipeline",
+        [
+            ("Name",   name),
+            ("Steps",  str(nsteps)),
+            ("Mode",   mode),
+            ("Center", center),
+        ],
+    )
+
+    payload = json.dumps(pipeline).encode()
+    req = urllib.request.Request(
+        f"{center}/api/pipeline",
+        data=payload,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+
+    # Total timeout: 300 s per step + buffer
+    total_timeout = 310 * nsteps
+    print(f"{_D}  Running pipeline in {mode_label} …{_R}\n", flush=True)
+
+    try:
+        with urllib.request.urlopen(req, timeout=total_timeout) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            body = json.loads(e.read())
+            msg  = body.get("message", str(e))
+            code = body.get("error", "")
+        except Exception:
+            msg, code = str(e), ""
+        if code == "no_agents":
+            print(f"  {_P}No agents connected.{_R}  Start one: {_W}vimin-core start-agent{_R}\n")
+        else:
+            print(f"  {_P}ERROR{_R}: {msg}\n")
+        return 1
+    except urllib.error.URLError:
+        print(f"  {_P}ERROR{_R}: Cannot connect to center at {center}.\n"
+              f"  Start it: {_W}vimin-core start-center{_R}\n")
+        return 1
+
+    _outputs_dir = _VIMIN_DIR / "outputs"
+    if args.output:
+        saved = _write_output(args.output, data)
+        print(f"  {_D}Response saved to  {_W}{saved}{_R}\n")
+    elif mode == "return":
+        ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        name_slug = pipeline.get("name", pipeline_path.stem).replace(" ", "-")
+        auto_path = _outputs_dir / f"pipeline-{name_slug}-{ts}.json"
+        saved = _write_output(str(auto_path), data)
+        print(f"  {_D}Results auto-saved to  {_W}{saved}{_R}\n")
+
+    steps = data.get("steps", [])
+    for s in steps:
+        step_num = s.get("step")
+        parallel = s.get("parallel", False)
+        results  = s.get("results", [])
+        label    = f"step {step_num}"
+        if parallel:
+            label += f" (parallel ×{len(results)})"
+        print(f"{_P}  ── {label}{_R}")
+        for r in results:
+            agent_id = (r.get("agent_id") or "")[:8]
+            output   = r.get("output") or ""
+            error    = r.get("error")
+            if error:
+                print(f"  {_D}[{agent_id}]{_R}  {_P}error:{_R} {error}")
+            elif isinstance(output, str) and output.startswith("[saved_locally] "):
+                saved_path = output[16:]
+                print(f"  {_D}[{agent_id}]{_R}  {_D}saved on edge device:{_R}  {_W}{saved_path}{_R}")
+            else:
+                for line in output.strip().splitlines():
+                    print(f"  {_D}[{agent_id}]{_R}  {line}")
+        print()
+
+    final = data.get("final_output", "")
+    if final and not str(final).startswith("[saved_locally]"):
+        print(f"{_P}  ── final output{_R}")
+        for line in final.strip().splitlines():
+            print(f"  {line}")
+        print()
+
     return 0
 
 
@@ -329,26 +599,66 @@ def main():
 
     # start-center
     sc = sub.add_parser("start-center", help="Start the orchestration center node")
-    sc.add_argument("--host", default="0.0.0.0")
+    sc.add_argument("--host", default="127.0.0.1",
+                    help="Interface to bind (default: 127.0.0.1 — localhost only). "
+                         "Pass 0.0.0.0 to accept connections from other machines.")
     sc.add_argument("--port", type=int, default=8080)
-    sc.add_argument("--daemon", action="store_true", help="Run in the background")
+    sc.add_argument("--foreground", action="store_true",
+                    help="Run in the foreground (default: daemon)")
     sc.add_argument("--debug", action="store_true")
 
     # start-agent
     sa = sub.add_parser("start-agent", help="Start a local inference agent node")
     sa.add_argument("--center", default=os.environ.get("VIMIN_CENTER_URL", "http://localhost:8080"))
-    sa.add_argument("--daemon", action="store_true", help="Run in the background")
+    sa.add_argument("--model", default=None, metavar="MODEL_ID",
+                    help="Pre-load this model on startup instead of waiting for the first task")
+    sa.add_argument("--foreground", action="store_true",
+                    help="Run in the foreground (default: daemon)")
     sa.add_argument("--debug", action="store_true")
     sa.add_argument("--openclaw", action="store_true",
                     help="Use a local OpenClaw Gateway as the inference engine")
     sa.add_argument("--openclaw-url", default=None,
                     help="OpenClaw Gateway URL (default: http://127.0.0.1:18789)")
+    sa.add_argument("--agent-id", default=None, dest="agent_id",
+                    help=argparse.SUPPRESS)  # internal: daemon parent pins the UUID
 
     # broadcast
     bc = sub.add_parser("broadcast", help="Send a prompt to all connected agents")
     bc.add_argument("prompt", help="The prompt to broadcast")
     bc.add_argument("--model", default=None, help=f"Model ID (default: {_DEFAULT_MODEL})")
     bc.add_argument("--max-tokens", type=int, default=300, dest="max_tokens")
+    bc.add_argument(
+        "--mode", choices=["return", "broadcast"], default=None,
+        help=(
+            "return — agents send results back to center (default). "
+            "broadcast — agents save results locally on the edge device."
+        ),
+    )
+    bc.add_argument("--output", default=None, metavar="FILE",
+                    help="Save full JSON response to this file")
+    bc.add_argument("--timeout", type=float, default=None, metavar="SECONDS",
+                    help="How long to wait for agent results (default: 60s)")
+
+    # run-pipeline
+    rp = sub.add_parser("run-pipeline", help="Run a multi-step pipeline on the fleet")
+    rp.add_argument("--pipeline", default=None, metavar="FILE",
+                    help="Path to a pipeline JSON file")
+    rp.add_argument("--preset", default=None, metavar="NAME",
+                    help="Built-in preset pipeline name (e.g. summarize-and-questions)")
+    rp.add_argument("--file", default=None, metavar="FILE",
+                    help="Input file — content replaces {{input}} in pipeline steps")
+    rp.add_argument("--input", default=None, metavar="TEXT",
+                    help="Input text — replaces {{input}} in pipeline steps")
+    rp.add_argument("--model", default=None, help=f"Default model ID (default: {_DEFAULT_MODEL})")
+    rp.add_argument(
+        "--mode", choices=["return", "broadcast"], default=None,
+        help=(
+            "return — agents send results back to center (default). "
+            "broadcast — agents save results locally on the edge device."
+        ),
+    )
+    rp.add_argument("--output", default=None, metavar="FILE",
+                    help="Save full JSON response to this file")
 
     # stop-center / stop-agent
     sub.add_parser("stop-center", help="Stop a daemonized center node")
@@ -362,6 +672,8 @@ def main():
         return _cmd_start_agent(args)
     elif args.command == "broadcast":
         return _cmd_broadcast(args)
+    elif args.command == "run-pipeline":
+        return _cmd_run_pipeline(args)
     elif args.command == "stop-center":
         return _cmd_stop_center(args)
     elif args.command == "stop-agent":

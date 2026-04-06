@@ -130,6 +130,11 @@ class UserAgent:
         # agent still works — tasks will just be sent in plaintext.
         self._loaded_model_id: Optional[str] = None  # Model currently loaded in memory
 
+        # Whisper backend for SPEECH_TO_TEXT tasks (lazy-loaded on first STT task)
+        self._whisper_backend = None
+        self._whisper_model_id: Optional[str] = None
+
+        self._start_time: float = time.time()
         self._session_key: Optional[str] = None
         self._fernet = None
         try:
@@ -160,6 +165,48 @@ class UserAgent:
             if discovered:
                 self.center_node_url = discovered
                 logger.debug(f"Auto-discovered Center Node: {self.center_node_url}")
+
+        # ── URL pinning ────────────────────────────────────────────────────────
+        # Persist the center URL on first successful connect.  If it changes on
+        # a subsequent run, warn the operator so silent redirections are visible.
+        try:
+            import json as _json
+            _cfg_path = os.path.join(os.path.expanduser("~"), ".vimin", "config.json")
+            _cfg: dict = {}
+            if os.path.exists(_cfg_path):
+                try:
+                    _cfg = _json.loads(open(_cfg_path).read())
+                except Exception:
+                    pass
+            _pinned = _cfg.get("pinned_center_url")
+            if _pinned and _pinned != self.center_node_url:
+                print(
+                    f"[vimin] WARNING: center URL changed from pinned value.\n"
+                    f"  Pinned:  {_pinned}\n"
+                    f"  Current: {self.center_node_url}\n"
+                    f"  If this is intentional, delete 'pinned_center_url' from ~/.vimin/config.json.",
+                    flush=True,
+                )
+            elif not _pinned:
+                _cfg["pinned_center_url"] = self.center_node_url
+                os.makedirs(os.path.dirname(_cfg_path), exist_ok=True)
+                with open(_cfg_path, "w") as _f:
+                    _f.write(_json.dumps(_cfg, indent=2))
+        except Exception as _pin_err:
+            logger.debug(f"URL pinning check failed (non-fatal): {_pin_err}")
+
+        # ── TLS warning ────────────────────────────────────────────────────────
+        _is_loopback = any(
+            h in self.center_node_url
+            for h in ("localhost", "127.0.0.1", "::1")
+        )
+        if not _is_loopback and self.center_node_url.startswith("http://"):
+            print(
+                f"[vimin] WARNING: connecting to {self.center_node_url} over plain HTTP.\n"
+                f"  Credentials and task data are transmitted unencrypted.\n"
+                f"  Use HTTPS for connections across untrusted networks.",
+                flush=True,
+            )
 
         logger.info("Starting User Agent...")
         self.running = True
@@ -201,23 +248,40 @@ class UserAgent:
         """Stop user agent"""
         logger.info("Stopping User Agent...")
         self.running = False
-        
+
         if self.heartbeat_task:
             self.heartbeat_task.cancel()
-        
+
         if self.metrics_task:
             self.metrics_task.cancel()
-        
+
         if self.commands_task:
             self.commands_task.cancel()
-        
+
+        # Announce graceful shutdown so the center immediately frees the node slot
+        try:
+            goodbye = {
+                "agent_id": self.agent_id,
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "status": "offline",
+                "uptime_seconds": time.time() - self._start_time,
+                "loaded_model_id": self._loaded_model_id,
+            }
+            headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+            self._heartbeat_sync(
+                f"{self.center_node_url}/api/agents/heartbeat",
+                goodbye,
+                headers,
+            )
+        except Exception as _bye_err:
+            logger.debug(f"Goodbye heartbeat failed (non-fatal): {_bye_err}")
+
         if self.session:
             await self.session.close()
-        
+
         if self.orchestrator:
             self.orchestrator.cleanup()
-        
-        self.running = False
+
         logger.info("User Agent stopped")
 
     async def _discover_center_node_via_mdns(self, timeout: float = 5.0) -> Optional[str]:
@@ -293,6 +357,19 @@ class UserAgent:
         except Exception as e:
             logger.error(f"Registration failed: {e}")
     
+    def _heartbeat_sync(self, url: str, data: dict, headers: dict) -> int:
+        """Synchronous urllib heartbeat POST. Returns HTTP status code."""
+        import urllib.request as _urlreq
+        body = json.dumps(data).encode()
+        req = _urlreq.Request(
+            url,
+            data=body,
+            headers={**headers, "Content-Type": "application/json"},
+            method="POST",
+        )
+        with _urlreq.urlopen(req, timeout=10) as resp:
+            return resp.status
+
     async def _heartbeat_loop(self):
         """Send periodic heartbeat to center node. Tracks connectivity state and
         flushes the offline telemetry buffer when the center node becomes reachable
@@ -303,23 +380,19 @@ class UserAgent:
                     "agent_id": self.agent_id,
                     "timestamp": datetime.utcnow().isoformat() + "Z",
                     "status": "online",
-                    "uptime_seconds": time.time(),
+                    "uptime_seconds": time.time() - self._start_time,
                     "loaded_model_id": self._loaded_model_id,
                 }
                 headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
-                async with self.session.post(
-                    f"{self.center_node_url}/api/agents/heartbeat",
-                    json=heartbeat_data,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=10) if AIOHTTP_AVAILABLE else None,
-                ) as response:
-                    if response.status == 200:
-                        if not self._connected:
-                            logger.info("Center node reachable again — flushing offline buffer")
-                            self._connected = True
-                            asyncio.create_task(self._flush_offline_buffer())
-                    else:
-                        logger.warning(f"Heartbeat failed: {response.status}")
+                url = f"{self.center_node_url}/api/agents/heartbeat"
+                status = await asyncio.to_thread(self._heartbeat_sync, url, heartbeat_data, headers)
+                if status == 200:
+                    if not self._connected:
+                        logger.info("Center node reachable again — flushing offline buffer")
+                        self._connected = True
+                        asyncio.create_task(self._flush_offline_buffer())
+                else:
+                    logger.warning(f"Heartbeat failed: {status}")
 
                 await asyncio.sleep(30)
 
@@ -360,74 +433,77 @@ class UserAgent:
                 logger.error(f"Metrics collection error: {e}")
                 await asyncio.sleep(60)
 
+    def _poll_commands_sync(self, url: str, headers: dict) -> dict:
+        """Synchronous urllib GET for pending commands. Returns parsed JSON dict."""
+        import urllib.request as _urlreq
+        req = _urlreq.Request(url, headers=headers, method="GET")
+        with _urlreq.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode())
+
     async def _command_polling_loop(self):
         """Poll for commands from center node"""
         while self.running:
             try:
                 headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
-                
-                async with self.session.get(
-                    f"{self.center_node_url}/api/agents/{self.agent_id}/pending-commands",
-                    headers=headers
-                ) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        commands = data.get('commands', [])
-                        for cmd in commands:
-                            logger.info(f"Received command: {cmd}")
-                            
-                            cmd_type = cmd.get('type')
-                            if cmd_type == 'set_model':
-                                model_id = cmd.get('model')
-                                if model_id and self.orchestrator:
-                                    asyncio.create_task(self._load_model_async(model_id))
-                                else:
-                                    logger.info(f"set_model: no model_id or orchestrator not ready")
-                            elif cmd_type == 'run_task':
-                                task_dict = cmd.get('task', {})
-                                data_policy = cmd.get('data_policy', {})
-                                # Decrypt data field if the center node encrypted it
-                                raw_data = task_dict.get('data', '')
-                                if task_dict.get('encrypted') and self._fernet and raw_data:
-                                    try:
-                                        raw_data = self._fernet.decrypt(raw_data.encode()).decode()
-                                    except Exception as dec_err:
-                                        logger.warning(f"Failed to decrypt task data: {dec_err}")
-                                task_dict = {**task_dict, 'data': raw_data}
+                url = f"{self.center_node_url}/api/agents/{self.agent_id}/pending-commands"
 
-                                if task_dict.get('continuous'):
-                                    asyncio.create_task(
-                                        self._run_continuous_task(task_dict, data_policy)
-                                    )
-                                else:
-                                    metadata = task_dict.get('metadata', {})
-                                    task = Task(
-                                        type=TaskType[task_dict.get('type', 'TEXT_GENERATION').upper()],
-                                        data=raw_data,
-                                        complexity=TaskComplexity[task_dict.get('complexity', 'low').upper()],
-                                        id=task_dict.get('task_id', task_dict.get('id', str(uuid.uuid4()))),
-                                        metadata=metadata,
-                                    )
-                                    model_id = task_dict.get('model_id')
-                                    if model_id and self.orchestrator:
-                                        asyncio.create_task(self._run_task_with_model(task, model_id))
-                                    else:
-                                        asyncio.create_task(self.execute_task(task))
+                data = await asyncio.to_thread(self._poll_commands_sync, url, headers)
+                commands = data.get('commands', [])
+                for cmd in commands:
+                    logger.info(f"Received command: {cmd}")
 
-                            elif cmd_type == 'stop_task':
-                                task_id = cmd.get('task_id', '')
-                                stop_event = self._continuous_tasks.get(task_id)
-                                if stop_event:
-                                    logger.info(f"Stopping continuous task {task_id}")
-                                    stop_event.set()
-                                else:
-                                    logger.debug(f"stop_task received for unknown task {task_id}")
+                    cmd_type = cmd.get('type')
+                    if cmd_type == 'set_model':
+                        model_id = cmd.get('model')
+                        if model_id and self.orchestrator:
+                            asyncio.create_task(self._load_model_async(model_id))
+                        else:
+                            logger.info(f"set_model: no model_id or orchestrator not ready")
+                    elif cmd_type == 'run_task':
+                        task_dict = cmd.get('task', {})
+                        data_policy = cmd.get('data_policy', {})
+                        # Decrypt data field if the center node encrypted it
+                        raw_data = task_dict.get('data', '')
+                        if task_dict.get('encrypted') and self._fernet and raw_data:
+                            try:
+                                raw_data = self._fernet.decrypt(raw_data.encode()).decode()
+                            except Exception as dec_err:
+                                logger.warning(f"Failed to decrypt task data: {dec_err}")
+                        task_dict = {**task_dict, 'data': raw_data}
 
-                            if self.on_command:
-                                if asyncio.iscoroutinefunction(self.on_command):
-                                    await self.on_command(cmd['type'], cmd.get('data', cmd))
-                                else:
-                                    self.on_command(cmd['type'], cmd.get('data', cmd))
+                        if task_dict.get('continuous'):
+                            asyncio.create_task(
+                                self._run_continuous_task(task_dict, data_policy)
+                            )
+                        else:
+                            metadata = task_dict.get('metadata', {})
+                            task = Task(
+                                type=TaskType[task_dict.get('type', 'TEXT_GENERATION').upper()],
+                                data=raw_data,
+                                complexity=TaskComplexity[task_dict.get('complexity', 'low').upper()],
+                                id=task_dict.get('task_id', task_dict.get('id', str(uuid.uuid4()))),
+                                metadata=metadata,
+                            )
+                            model_id = task_dict.get('model_id')
+                            if model_id and self.orchestrator:
+                                asyncio.create_task(self._run_task_with_model(task, model_id))
+                            else:
+                                asyncio.create_task(self.execute_task(task))
+
+                    elif cmd_type == 'stop_task':
+                        task_id = cmd.get('task_id', '')
+                        stop_event = self._continuous_tasks.get(task_id)
+                        if stop_event:
+                            logger.info(f"Stopping continuous task {task_id}")
+                            stop_event.set()
+                        else:
+                            logger.debug(f"stop_task received for unknown task {task_id}")
+
+                    if self.on_command:
+                        if asyncio.iscoroutinefunction(self.on_command):
+                            await self.on_command(cmd['type'], cmd.get('data', cmd))
+                        else:
+                            self.on_command(cmd['type'], cmd.get('data', cmd))
                     
                 await asyncio.sleep(2)  # Poll every 2 seconds
                 
@@ -459,30 +535,15 @@ class UserAgent:
         )
     
     def _get_model_status(self) -> List[ModelStatus]:
-        """Get status of all models"""
-        models_dir = os.path.join(os.path.dirname(__file__), "..", "..", "models")
-        model_configs = [
-            ("TinyBERT", "prajjwal1_bert-tiny/model.onnx"),
-            ("MobileBERT", "google_mobilebert-uncased_int8.onnx"),
-            ("MiniLM", "microsoft_MiniLM-L12-H384-uncased/model.onnx"),
-            ("Llama 3.2", "meta-llama_Llama-3.2-3B-Instruct/model.onnx")
-        ]
-        
-        status_list = []
-        for name, path in model_configs:
-            full_path = os.path.join(models_dir, path)
-            is_installed = os.path.exists(full_path)
-            size_mb = os.path.getsize(full_path) / (1024*1024) if is_installed else 0
-            
-            status_list.append(ModelStatus(
-                model_name=name,
-                model_path=full_path,
-                is_installed=is_installed,
-                file_size_mb=size_mb,
-                last_updated=datetime.fromtimestamp(os.path.getmtime(full_path)).isoformat() if is_installed else None
-            ))
-        
-        return status_list
+        """Return the status of the currently loaded generative model, if any."""
+        if self._loaded_model_id:
+            return [ModelStatus(
+                model_name=self._loaded_model_id,
+                model_path="",
+                is_installed=True,
+                file_size_mb=0.0,
+            )]
+        return []
     
     def _collect_performance_metrics(self) -> PerformanceMetrics:
         """Collect current performance metrics"""
@@ -561,11 +622,22 @@ class UserAgent:
 
     async def _run_task_with_model(self, task: Task, model_id: str) -> None:
         """Ensure the requested model is loaded, then execute the task."""
-        if not self.orchestrator.is_generative_model_loaded():
+        if not self.orchestrator.is_generative_model_loaded() or self._loaded_model_id != model_id:
             loaded = await self._load_model_async(model_id)
             if not loaded:
                 logger.error(f"Cannot execute task {task.id}: model '{model_id}' failed to load")
                 print(f"[vimin] ERROR: cannot run task {task.id} — model failed to load", flush=True)
+                # Report failure so the center doesn't wait the full timeout
+                await self._report_task_completion({
+                    "task_id": task.id,
+                    "task_type": "text_generation",
+                    "success": False,
+                    "result": "",
+                    "error": f"Model '{model_id}' failed to load",
+                    "execution_time_ms": 0,
+                    "execution_target": "local",
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                })
                 return
         await self.execute_task(task)
 
@@ -687,6 +759,71 @@ class UserAgent:
         print(f"[vimin] Task received: {task_id} — running inference ...", flush=True)
 
         try:
+            # ----------------------------------------------------------------
+            # SPEECH_TO_TEXT — route to WhisperBackend (mlx-whisper on Apple
+            # Silicon).  task.data should be a local audio file path.  The
+            # model_id field (or metadata.model_id) selects the checkpoint;
+            # defaults to whisper-base for lowest latency.
+            # ----------------------------------------------------------------
+            if getattr(task, "type", None) == TaskType.SPEECH_TO_TEXT:
+                model_id = (
+                    getattr(task, "model_id", None)
+                    or (task.metadata.get("model_id") if hasattr(task, "metadata") else None)
+                    or "openai/whisper-base"
+                )
+                audio_path = task.data if isinstance(task.data, str) else str(task.data)
+                language = task.metadata.get("language") if hasattr(task, "metadata") else None
+
+                try:
+                    from vimin_core.core.backends.whisper_backend import WhisperBackend
+                    from vimin_core.core.backends import ModelDescriptor
+                except ImportError as exc:
+                    raise RuntimeError(
+                        f"WhisperBackend not available — install mlx-whisper: "
+                        f"pip install 'vimin-core[whisper]'"
+                    ) from exc
+
+                async with self._inference_lock:
+                    if self._whisper_backend is None:
+                        self._whisper_backend = WhisperBackend()
+                    if self._whisper_model_id != model_id:
+                        descriptor = ModelDescriptor(model_id=model_id)
+                        loaded = await asyncio.to_thread(self._whisper_backend.load, descriptor)
+                        if not loaded:
+                            raise RuntimeError(f"Whisper model '{model_id}' failed to load")
+                        self._whisper_model_id = model_id
+                        print(f"[vimin] Whisper model ready: {model_id}", flush=True)
+
+                    result_dict = await asyncio.to_thread(
+                        self._whisper_backend.transcribe, audio_path, language
+                    )
+
+                output = result_dict.get("text", "").strip()
+                success = True
+                execution_target = "local_whisper"
+                execution_time = time.time() - start_time
+                print(f"[vimin] Inference complete: {task_id} ({execution_time:.1f}s)", flush=True)
+                if output:
+                    print(f"[vimin] Output:\n{output}", flush=True)
+                save_local = task.metadata.get("save_local", False) if hasattr(task, "metadata") else False
+                result_for_center, saved_path = self._handle_save_local(
+                    task_id, task_type_str, output, save_local
+                )
+                task_record = {
+                    "task_id": task_id,
+                    "task_type": task_type_str,
+                    "success": success,
+                    "result": result_for_center,
+                    "execution_time_ms": execution_time * 1000,
+                    "execution_target": execution_target,
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                }
+                if saved_path:
+                    task_record["output_path"] = saved_path
+                self.task_history.append(task_record)
+                await self._report_task_completion(task_record)
+                return {"success": True, "result": output, "execution_time_ms": execution_time * 1000}
+
             if self.orchestrator:
                 stream_requested = (
                     task.metadata.get("stream", False)
@@ -699,30 +836,53 @@ class UserAgent:
 
                 if use_streaming:
                     # --------------------------------------------------------
-                    # Streaming path: yield tokens to center node as they arrive
-                    # Lock ensures only one inference uses the backend at a time.
+                    # Streaming path: yield tokens to center node as they arrive.
+                    # The generator runs in a thread-pool executor so each token
+                    # computation (CPU/GPU-bound) does not block the event loop.
+                    # Tokens are passed back via an asyncio.Queue so heartbeats
+                    # and command polling can interleave between batches.
+                    # The inference lock is held for the full duration so only
+                    # one backend call is in flight at a time.
                     # --------------------------------------------------------
                     output_chunks: list[str] = []
                     buffer: list[str] = []
                     _BATCH_TOKENS = 8  # POST every N tokens for low latency
 
+                    _loop = asyncio.get_running_loop()
+                    _token_queue: asyncio.Queue = asyncio.Queue()
+
+                    def _stream_in_thread():
+                        try:
+                            for _tok in self.orchestrator.stream_execute_task(task):
+                                _loop.call_soon_threadsafe(_token_queue.put_nowait, _tok)
+                        except Exception as _exc:
+                            _loop.call_soon_threadsafe(_token_queue.put_nowait, _exc)
+                        finally:
+                            _loop.call_soon_threadsafe(_token_queue.put_nowait, None)
+
                     async with self._inference_lock:
-                        for token in self.orchestrator.stream_execute_task(task):
-                            buffer.append(token)
-                            output_chunks.append(token)
+                        _thread_future = _loop.run_in_executor(None, _stream_in_thread)
+                        while True:
+                            item = await _token_queue.get()
+                            if item is None:
+                                break
+                            if isinstance(item, BaseException):
+                                await _thread_future
+                                raise item
+                            buffer.append(item)
+                            output_chunks.append(item)
                             if len(buffer) >= _BATCH_TOKENS:
                                 await self._report_partial_result(
                                     task_id, "".join(buffer), len("".join(output_chunks))
                                 )
                                 buffer = []
-
-                        # Flush remaining tokens as final chunk
                         await self._report_partial_result(
                             task_id,
                             "".join(buffer),
                             len("".join(output_chunks)),
                             final=True,
                         )
+                        await _thread_future
 
                     output = "".join(output_chunks)
                     success = True
@@ -759,20 +919,29 @@ class UserAgent:
                 execution_target = "demo"
 
             execution_time = time.time() - start_time
-            print(f"[vimin] Inference complete: {task_id} ({execution_time:.1f}s) — sending result to center ...", flush=True)
+            print(f"[vimin] Inference complete: {task_id} ({execution_time:.1f}s)", flush=True)
+
+            # Always print the output on the edge node so it's visible in the agent log
+            output_str = (output[:32768] if isinstance(output, str) else "") if output else ""
+            if output_str:
+                print(f"[vimin] Output:\n{output_str}", flush=True)
+
+            save_local = task.metadata.get("save_local", False) if hasattr(task, "metadata") else False
+            result_for_center, saved_path = self._handle_save_local(
+                task_id, task_type_str, output_str, save_local
+            )
 
             task_record = {
                 "task_id": task_id,
                 "task_type": task_type_str,
                 "success": success,
-                # result is included so the center node can feed it into the next
-                # workflow step via {{stepN_output}} template substitution.
-                # Capped at 32 KB to avoid bloating heartbeat traffic.
-                "result": (output[:32768] if isinstance(output, str) else "") if output else "",
+                "result": result_for_center,
                 "execution_time_ms": execution_time * 1000,
                 "execution_target": execution_target,
                 "timestamp": datetime.utcnow().isoformat() + "Z",
             }
+            if saved_path:
+                task_record["output_path"] = saved_path
             self.task_history.append(task_record)
             await self._report_task_completion(task_record)
 
@@ -786,11 +955,53 @@ class UserAgent:
         except Exception as exc:
             logger.error(f"Task {task_id} execution failed: {exc}")
             print(f"[vimin] ERROR: task {task_id} failed — {exc}", flush=True)
+            execution_time = time.time() - start_time
+            task_record = {
+                "task_id": task_id,
+                "task_type": task_type_str,
+                "success": False,
+                "result": "",
+                "error": str(exc),
+                "execution_time_ms": execution_time * 1000,
+                "execution_target": "unknown",
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+            }
+            self.task_history.append(task_record)
+            await self._report_task_completion(task_record)
             return {
                 "success": False,
                 "error": str(exc),
-                "execution_time_ms": (time.time() - start_time) * 1000,
+                "execution_time_ms": execution_time * 1000,
             }
+
+    def _handle_save_local(
+        self,
+        task_id: str,
+        task_type: str,
+        output: str,
+        save_local: bool,
+    ) -> tuple:
+        """
+        If save_local is True, write output to ~/.vimin/outputs/ and return a
+        lightweight reference string for the center node instead of the full text.
+        Returns (result_for_center, saved_path_or_None).
+        """
+        if not save_local or not output:
+            return output, None
+        output_dir = os.path.join(os.path.expanduser("~"), ".vimin", "outputs")
+        os.makedirs(output_dir, exist_ok=True)
+        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        safe_type = task_type.lower().replace("_", "-")
+        filename = f"{ts}_{safe_type}_{task_id[:12]}.txt"
+        path = os.path.join(output_dir, filename)
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(output)
+            print(f"[vimin] Output saved: {path}", flush=True)
+            return f"[saved_locally] {path}", path
+        except Exception as exc:
+            logger.warning(f"Could not save output locally: {exc}")
+            return output, None
 
     async def _report_partial_result(
         self,
@@ -848,20 +1059,32 @@ class UserAgent:
             self._buffer_locally("/api/agents/task-completion", payload)
             return
 
+        # Use urllib (a fresh TCP connection each time) rather than the shared
+        # aiohttp session.  After long inference runs the aiohttp session's
+        # internal keep-alive connections go stale; a subsequent POST silently
+        # times out, the result gets buffered locally, and the center never
+        # receives it.  urllib avoids shared session state entirely.
+        url = f"{self.center_node_url}/api/agents/task-completion"
         try:
-            async with self.session.post(
-                f"{self.center_node_url}/api/agents/task-completion",
-                json=payload,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=10) if AIOHTTP_AVAILABLE else None,
-            ) as response:
-                if response.status != 200:
-                    logger.warning(f"Task completion report failed: {response.status}")
-                    self._buffer_locally("/api/agents/task-completion", payload)
-
+            await asyncio.to_thread(self._post_completion_sync, url, payload, headers)
         except Exception as e:
             logger.warning(f"Failed to report task completion (buffering locally): {e}")
             self._buffer_locally("/api/agents/task-completion", payload)
+
+    def _post_completion_sync(self, url: str, payload: Dict[str, Any], headers: Dict[str, str]) -> None:
+        """Synchronous urllib POST — called via asyncio.to_thread so it doesn't block the event loop.
+        Uses a fresh TCP connection each time to avoid stale aiohttp keep-alive issues."""
+        import urllib.request as _urlreq
+        data = json.dumps(payload).encode()
+        req = _urlreq.Request(
+            url,
+            data=data,
+            headers={**headers, "Content-Type": "application/json"},
+            method="POST",
+        )
+        with _urlreq.urlopen(req, timeout=15) as resp:
+            if resp.status not in (200, 201, 202):
+                raise RuntimeError(f"Task completion POST returned {resp.status}")
 
     def _buffer_locally(self, path: str, payload: Dict[str, Any]) -> None:
         """Append a failed POST to the local offline buffer file (NDJSON)."""
@@ -894,14 +1117,8 @@ class UserAgent:
         failed: list = []
         for entry in entries:
             try:
-                async with self.session.post(
-                    f"{self.center_node_url}{entry['path']}",
-                    json=entry["payload"],
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=10) if AIOHTTP_AVAILABLE else None,
-                ) as resp:
-                    if resp.status not in (200, 201, 202):
-                        failed.append(entry)
+                url = f"{self.center_node_url}{entry['path']}"
+                await asyncio.to_thread(self._post_completion_sync, url, entry["payload"], headers)
             except Exception:
                 failed.append(entry)
 
@@ -978,25 +1195,30 @@ async def main():
         fleet_token=args.fleet_token,
     )
     
-    try:
-        await agent.start()
-        print(f"User Agent running. ID: {agent.agent_id}")
-        if args.model:
-            print(f"Pre-loading model: {args.model}")
-            ok = await agent._load_model_async(args.model)
-            if ok:
-                print(f"Model ready: {args.model}")
-            else:
-                print(f"Warning: model pre-load failed for {args.model}")
-        print("Press Ctrl+C to stop...")
-        
-        # Keep running
-        while True:
-            await asyncio.sleep(1)
-    
-    except KeyboardInterrupt:
-        print("\nShutting down...")
-        await agent.stop()
+    import signal as _signal
+
+    loop = asyncio.get_event_loop()
+    stop_event = asyncio.Event()
+
+    # SIGTERM (sent by `vimin-core stop-agent`) and Ctrl+C both trigger
+    # graceful shutdown so the goodbye heartbeat is always delivered.
+    loop.add_signal_handler(_signal.SIGTERM, stop_event.set)
+    loop.add_signal_handler(_signal.SIGINT, stop_event.set)
+
+    await agent.start()
+    print(f"User Agent running. ID: {agent.agent_id}")
+    if args.model:
+        print(f"Pre-loading model: {args.model}")
+        ok = await agent._load_model_async(args.model)
+        if ok:
+            print(f"Model ready: {args.model}")
+        else:
+            print(f"Warning: model pre-load failed for {args.model}")
+    print("Press Ctrl+C to stop...")
+
+    await stop_event.wait()
+    print("\nShutting down...")
+    await agent.stop()
 
 
 if __name__ == "__main__":

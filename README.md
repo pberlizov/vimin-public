@@ -2,25 +2,40 @@
 
 # vimin-core
 
-Open-source local AI inference orchestration. Run open-source LLMs across up to **10 machines** on your network — no cloud, no API keys, no data leaving your premises.
+Open-source local AI inference orchestration. Run open-source LLMs and speech models across up to **10 machines** — no cloud, no API keys, no data leaving your hardware.
 
 ## What it does
 
-vimin-core lets you coordinate a small fleet of machines (laptops, desktops, Mac minis, servers) to run local AI inference together. You start a **center node** on one machine to act as the orchestration hub, then connect **agent nodes** on each machine that will run models. Any broadcast query you send to the center node goes to all connected agents simultaneously.
+vimin-core lets you coordinate a fleet of machines (laptops, desktops, Mac minis, servers) to run local AI inference together. You start a **center node** on one machine as the orchestration hub, then connect **agent nodes** on each machine that will run models.
+
+**Two ways to use it:**
+
+- **Broadcast** — send a prompt to all connected agents simultaneously and collect every response. Good for parallel reasoning, model comparison, or redundant inference.
+- **Pipelines** — run multi-step workflows where each step is a different task type (translation, PII masking, speech-to-text, summarization, classification, etc.) and output from one step feeds the next.
+
+**Task types:**
+
+| Type | What runs it |
+|------|-------------|
+| `TEXT_GENERATION`, `SUMMARIZATION`, `REASONING`, `TRANSLATION`, `CODE_GENERATION`, `CLASSIFICATION`, `SENTIMENT_ANALYSIS` | The loaded LLM (MLX or llama-cpp) |
+| `PII_MASKING` | ONNX NER model, regex scrubber, or LLM fallback — nothing leaves the device |
+| `SPEECH_TO_TEXT` | Whisper — mlx-whisper on Apple Silicon, faster-whisper on all other platforms |
 
 **Use cases:**
 - Parallel inference across multiple machines for higher throughput
-- Running different models on different machines and comparing outputs
+- Multi-step document pipelines (translate → redact PII → summarize)
+- Meeting transcription → action item extraction
+- Code review, support ticket triage, competitive research
 - Offline AI workflows in air-gapped or privacy-sensitive environments
-- Local AI demos on a small cluster without cloud dependencies
-- Development and experimentation with multi-node inference pipelines
+- Comparing outputs from different models side-by-side
 
 **Limits in vimin-core (open-source):**
 - Maximum 10 nodes
-- Broadcast dispatch only — every query goes to all nodes simultaneously
-- No per-node targeting, fleet pipelines, or workflow orchestration
+- No per-node targeting — pipelines auto-select an available agent per step
+- No role-based access control or audit logging
+- No enterprise dashboard
 
-For larger fleets, per-node routing, and production features, see [vimin](https://vimin.ai).
+For larger fleets, per-node routing, and production features, see [vimin](https://viminlabs.com).
 
 ---
 
@@ -29,28 +44,35 @@ For larger fleets, per-node routing, and production features, see [vimin](https:
 ### 1. Install
 
 ```bash
-# Base install (networking only — add a backend for inference)
-pip install -e .
-
 # Apple Silicon text models (recommended for M-series Macs)
-pip install -e ".[mlx]"
+pip install 'vimin-core[mlx]'
 
 # Apple Silicon voice / speech-to-text (Whisper)
-pip install -e ".[whisper]"
+pip install 'vimin-core[whisper]'
 
 # Any platform — CPU, CUDA, or Apple Metal via GGUF
-pip install -e ".[llamacpp]"
+pip install 'vimin-core[llamacpp]'
 
 # Everything
-pip install -e ".[all]"
+pip install 'vimin-core[all]'
+```
+
+Or install directly from GitHub:
+
+```bash
+pip install "vimin-core[mlx,whisper,secure,discovery] @ git+https://github.com/pberlizov/vimin-public.git"
 ```
 
 ### 2. Start the center node
 
-Run this once on the machine that will act as the hub:
-
 ```bash
 vimin-core start-center
+```
+
+The center runs as a **background daemon** by default. To run in the foreground instead (e.g. to watch logs live):
+
+```bash
+vimin-core start-center --foreground
 ```
 
 ```
@@ -64,49 +86,141 @@ vimin-core start-center
   │  Fleet token:  <generated-token>               │
   │  Node limit:   10  (upgrade to vimin for more) │
   ╰────────────────────────────────────────────────╯
+
+  Running in background.
+  PID  1234  |  Logs  ~/.vimin/logs/center.log
+  Stop with  vimin-core stop-center
 ```
 
-> **zsh users:** quote the extras specifier to avoid glob expansion:
-> `pip install 'vimin-core[mlx]'`
+By default the center binds to `127.0.0.1` (this machine only). To accept connections from other machines:
 
-Custom host/port:
 ```bash
-vimin-core start-center --host 192.168.1.10 --port 9000
+vimin-core start-center --host 0.0.0.0
 ```
 
-The generated API key and fleet token are saved to `~/.vimin/config.json` and reused on subsequent starts.
+A warning is printed when binding to a non-loopback interface. Use TLS and a firewall rule to protect the port in production.
+
+The generated API key and fleet token are saved to `~/.vimin/config.json` and reused on subsequent starts. To use a custom key across all machines in your fleet:
+
+```bash
+export ORCHESTRATOR_MASTER_KEY="your-shared-secret"
+vimin-core start-center --host 0.0.0.0
+```
+
+Set the same `ORCHESTRATOR_MASTER_KEY` on every agent machine.
+
+Watch center logs:
+```bash
+tail -f ~/.vimin/logs/center.log
+```
 
 ### 3. Connect agent nodes
 
-On each machine that will run models:
+On the same machine (or any machine with network access to the center):
 
 ```bash
-VIMIN_CENTER_URL=http://<center-ip>:8080 vimin-core start-agent
-```
+# Same machine
+vimin-core start-agent
 
-Or pass the URL directly:
-```bash
+# Remote machine — pass center's LAN IP
 vimin-core start-agent --center http://192.168.1.10:8080
+
+# Or via environment variable
+VIMIN_CENTER_URL=http://192.168.1.10:8080 vimin-core start-agent
 ```
 
-The agent registers with the center and waits for tasks.
-
-### 4. Send a broadcast query
-
-From any machine with network access to the center:
+Agents also run as background daemons by default. Watch agent logs:
 
 ```bash
-curl -X POST http://<center-ip>:8080/api/broadcast \
-  -H "Authorization: Bearer <api-key>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "prompt": "Summarize the key benefits of local AI inference.",
-    "model_id": "meta-llama/Llama-3.2-3B-Instruct",
-    "max_tokens": 200
-  }'
+tail -f ~/.vimin/logs/agent-*.log
 ```
 
-All online agents receive the prompt, run inference locally, and return results. The center node aggregates and returns all responses.
+**Agent ID persistence:** Each agent is assigned a stable ID on first run, saved to `~/.vimin/config.json`. If an agent disconnects and reconnects, it uses the same ID — so tasks queued while it was offline are delivered automatically on reconnect.
+
+**Graceful shutdown:** When you run `vimin-core stop-agent`, the agent sends a goodbye heartbeat to the center before exiting. The node slot is freed immediately rather than waiting for a heartbeat timeout.
+
+### 4. Broadcast a prompt
+
+```bash
+vimin-core broadcast "What is the capital of Japan?" --mode return
+```
+
+`--mode return` sends results back to your terminal and **auto-saves them** to `~/.vimin/outputs/broadcast-YYYYMMDD-HHMMSS.json`. `--mode broadcast` runs inference and saves results on the edge device only — nothing comes back to the center.
+
+**Offline queuing:** If an agent is offline when a broadcast goes out, the task is queued at the center. When that agent reconnects (using its persistent ID), the queued task is dispatched automatically. The result is not sent back to the original broadcast caller — it is written to the agent's log and the center's audit log.
+
+To find offline task results:
+```bash
+# Agent log (contains the model's output)
+tail -100 ~/.vimin/logs/agent-*.log
+
+# Center audit log (structured JSON records of all completed tasks)
+tail -20 ~/.vimin/audit.log
+```
+
+### 5. Run a pipeline
+
+```bash
+# Translate Spanish → English, then summarize
+vimin-core run-pipeline \
+  --preset translate-and-summarize \
+  --input "El banco central anunció una subida de tipos de interés del 0,25%." \
+  --mode return
+
+# Redact PII from a document, then summarize — nothing leaves the device
+vimin-core run-pipeline \
+  --preset pii-redact-then-summarize \
+  --file patient_record.txt \
+  --mode broadcast
+
+# Full investigative report, saved to a JSON file
+vimin-core run-pipeline \
+  --preset analyze-and-report \
+  --file case_file.md \
+  --mode return \
+  --output ~/results/report.json
+```
+
+---
+
+## Built-in Presets
+
+| Preset | Steps | What it does |
+|--------|-------|-------------|
+| `translate-and-summarize` | `TRANSLATION` → `SUMMARIZATION` | Translate any language to English, then summarize |
+| `pii-redact-then-summarize` | `PII_MASKING` → `SUMMARIZATION` | Redact PII on-device, then summarize the clean text |
+| `summarize-and-questions` | `SUMMARIZATION` → `REASONING` | Summarize a document, then generate follow-up questions |
+| `analyze-and-report` | `REASONING` → `REASONING` → `SUMMARIZATION` | Extract facts, identify risks, produce an executive summary |
+| `code-review` | parallel [`CODE_GENERATION`, `CODE_GENERATION`] → `REASONING` | Bug hunt and security review in parallel, then a combined verdict |
+| `support-triage` | parallel [`CLASSIFICATION`, `SENTIMENT_ANALYSIS`] → `TEXT_GENERATION` | Classify and score sentiment in parallel, then draft a response |
+| `transcribe-and-analyze` | `SPEECH_TO_TEXT` → `TEXT_GENERATION` | Transcribe audio, then analyze the content |
+| `meeting-minutes` | `SPEECH_TO_TEXT` → `SUMMARIZATION` → `CLASSIFICATION` | Full meeting minutes: transcript → summary → action items |
+| `parallel-perspectives` | parallel [`REASONING`, `REASONING`] → `SUMMARIZATION` | Two agents reason independently, a third synthesizes |
+
+Pass a file or inline text with `--file` or `--input`. Audio files (`.wav`, `.mp3`, `.m4a`, etc.) are automatically routed as paths for `SPEECH_TO_TEXT` steps.
+
+Custom pipelines: write a JSON file and pass it with `--pipeline`:
+
+```json
+{
+  "name": "My pipeline",
+  "steps": [
+    {
+      "type": "TRANSLATION",
+      "data": "Translate to English: {{input}}",
+      "timeout": 180
+    },
+    {
+      "type": "SUMMARIZATION",
+      "data": "Summarize in 3 sentences: {{step1_output}}"
+    }
+  ]
+}
+```
+
+```bash
+vimin-core run-pipeline --pipeline my_pipeline.json --input "..." --mode return
+```
 
 ---
 
@@ -116,7 +230,7 @@ vimin-core ships with built-in aliases for the models below — pass the canonic
 
 ### Text — Apple Silicon (MLX backend)
 
-4-bit quantised checkpoints load from the `mlx-community` org automatically. No manual conversion needed. Install with `pip install -e ".[mlx]"`.
+4-bit quantised checkpoints load from the `mlx-community` org automatically. No manual conversion needed. Install with `pip install 'vimin-core[mlx]'`.
 
 **Compact (≤ 2 GB RAM — fits on any modern Mac)**
 
@@ -181,22 +295,27 @@ vimin-core ships with built-in aliases for the models below — pass the canonic
 | `google/gemma-3-27b-it` | 27B | ~20 GB | Gemma 3 flagship |
 | `meta-llama/Llama-3.3-70B-Instruct` | 70B | ~42 GB | Frontier-class open model |
 
-### Voice — Apple Silicon (Whisper backend)
+### Voice — Speech-to-Text (Whisper)
 
-Install with `pip install -e ".[whisper]"`. Pass `openai/whisper-*` IDs and the optimised MLX checkpoint is used automatically.
+Install with `pip install 'vimin-core[whisper]'`. The right backend is chosen automatically:
+
+- **Apple Silicon** — `mlx-whisper` (ANE-accelerated, fastest)
+- **Linux / Windows / Intel Mac** — `faster-whisper` (CTranslate2, CPU or CUDA)
+
+Pass `openai/whisper-*` IDs on any platform:
 
 | Model | RAM | Speed | Best for |
 |-------|-----|-------|----------|
 | `openai/whisper-tiny` | ~0.2 GB | Fastest | Real-time on constrained hardware |
 | `openai/whisper-base` | ~0.3 GB | Very fast | Good default for most tasks |
 | `openai/whisper-small` | ~0.6 GB | Fast | Better accuracy, still lightweight |
-| `openai/whisper-medium` | ~1.5 GB | Moderate | High accuracy, 16 GB+ Mac |
+| `openai/whisper-medium` | ~1.5 GB | Moderate | High accuracy |
 | `openai/whisper-large-v3-turbo` | ~1.6 GB | Fast | Near-large quality, 2× faster |
 | `openai/whisper-large-v3` | ~3 GB | Slower | Best accuracy available |
 
 ### Any Platform (llama-cpp backend)
 
-Runs GGUF models on CPU, Apple Metal, or NVIDIA CUDA. Install with `pip install -e ".[llamacpp]"`. Download `.gguf` files from HuggingFace and pass the local path:
+Runs GGUF models on CPU, Apple Metal, or NVIDIA CUDA. Install with `pip install 'vimin-core[llamacpp]'`. Download `.gguf` files from HuggingFace and pass the local path:
 
 ```json
 { "model_id": "local-model", "path": "/path/to/model.gguf" }
@@ -221,29 +340,6 @@ CMAKE_ARGS="-DLLAMA_CUDA=on" pip install llama-cpp-python --no-cache-dir
 
 ---
 
-## Example Workflows
-
-Pre-built workflow scripts live in the [`examples/`](examples/) directory. Each is a self-contained script that connects to your fleet via the broadcast API.
-
-| Script | What it does |
-|--------|-------------|
-| [`workflow_voice_transcription.py`](examples/workflow_voice_transcription.py) | Record microphone → Whisper transcription → fleet analysis |
-| [`workflow_meeting_minutes.py`](examples/workflow_meeting_minutes.py) | Audio/transcript → Whisper → extract summary, decisions, action items |
-| [`workflow_document_analysis.py`](examples/workflow_document_analysis.py) | File or stdin → parallel doc analysis (summary, facts, risks, sentiment) |
-| [`workflow_code_review.py`](examples/workflow_code_review.py) | Source file or `git diff` → parallel code review (bugs, security, verdict) |
-| [`workflow_multi_language.py`](examples/workflow_multi_language.py) | Text → simultaneous translation into multiple languages |
-| [`workflow_batch_summarization.py`](examples/workflow_batch_summarization.py) | Folder of documents → distributed parallel summarization with JSON report |
-| [`workflow_pii_redaction.py`](examples/workflow_pii_redaction.py) | Text or file → on-device PII detection and redaction (GDPR/HIPAA prep) |
-| [`workflow_support_triage.py`](examples/workflow_support_triage.py) | Support tickets → parallel classification, priority, routing, sentiment |
-| [`workflow_competitive_research.py`](examples/workflow_competitive_research.py) | Competitor text → strategic analysis (features, pricing, risks, positioning) |
-| [`workflow_structured_extraction.py`](examples/workflow_structured_extraction.py) | Documents → JSON extraction using built-in schemas (invoice, job, contract) |
-| [`workflow_local_rag.py`](examples/workflow_local_rag.py) | Local RAG: index a doc folder, retrieve relevant chunks, generate on fleet |
-| [`workflow_openclaw_fleet.py`](examples/workflow_openclaw_fleet.py) | OpenClaw-backed inference: list models, direct query, or fleet broadcast |
-
-All scripts read `VIMIN_CENTER_URL` and `ORCHESTRATOR_API_KEY` from the environment, or accept `--center` and `--api-key` CLI arguments.
-
----
-
 ## API Reference
 
 All endpoints require `Authorization: Bearer <api-key>`.
@@ -252,25 +348,53 @@ All endpoints require `Authorization: Bearer <api-key>`.
 
 Send a prompt to all online agents simultaneously.
 
-```json
-{
-  "prompt": "Your prompt here",
-  "model_id": "meta-llama/Llama-3.2-3B-Instruct",
-  "max_tokens": 256,
-  "temperature": 0.7
-}
+```bash
+curl -X POST http://localhost:8080/api/broadcast \
+  -H "Authorization: Bearer <api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Your prompt here",
+    "model_id": "meta-llama/Llama-3.2-3B-Instruct",
+    "max_tokens": 256,
+    "mode": "return",
+    "timeout": 60
+  }'
 ```
+
+`mode`: `"return"` (default) sends results to the caller; `"broadcast"` saves results on each agent at `~/.vimin/outputs/`.
 
 Response:
 ```json
 {
-  "broadcast_id": "abc123",
+  "broadcast_id": "bcast_abc123",
   "results": [
-    { "agent_id": "node-1", "output": "...", "latency_ms": 1240 },
-    { "agent_id": "node-2", "output": "...", "latency_ms": 980 }
+    { "agent_id": "node-1", "output": "Tokyo.", "latency_ms": 1240 },
+    { "agent_id": "node-2", "output": "Tokyo.", "latency_ms": 980 }
   ]
 }
 ```
+
+### `POST /api/pipeline`
+
+Run a multi-step pipeline. Steps execute sequentially; an array of steps executes in parallel across available agents.
+
+```bash
+curl -X POST http://localhost:8080/api/pipeline \
+  -H "Authorization: Bearer <api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Translate and Summarize",
+    "input": "El banco central anunció...",
+    "model_id": "mlx-community/Qwen2.5-3B-Instruct-4bit",
+    "mode": "return",
+    "steps": [
+      { "type": "TRANSLATION", "data": "Translate to English: {{input}}" },
+      { "type": "SUMMARIZATION", "data": "Summarize: {{step1_output}}" }
+    ]
+  }'
+```
+
+Use `{{input}}` and `{{stepN_output}}` as placeholders. Each step can override `model_id`, `timeout`, and `metadata` (e.g. `max_tokens`).
 
 ### `GET /api/agents`
 
@@ -278,7 +402,7 @@ List all registered agents and their status.
 
 ### `GET /api/health`
 
-Health check — returns center node uptime and node count.
+Health check — returns center uptime and node count.
 
 ---
 
@@ -290,17 +414,35 @@ Settings are stored in `~/.vimin/config.json`:
 {
   "api_key": "auto-generated",
   "fleet_token": "auto-generated",
-  "center_url": "http://localhost:8080"
+  "agent_id": "auto-generated",
+  "center_url": "http://localhost:8080",
+  "pinned_center_url": "http://localhost:8080"
 }
 ```
+
+`agent_id` is generated once and reused across restarts so the center can match a reconnecting agent to its queued tasks.
+
+`pinned_center_url` is written by the agent on first registration. If the center URL changes on a subsequent run, the agent prints a warning. Delete the key to reset.
 
 ### Environment variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `VIMIN_CENTER_URL` | `http://localhost:8080` | Center node URL (used by agents) |
-| `ORCHESTRATOR_API_KEY` | from config | API key for authenticating requests |
+| `ORCHESTRATOR_MASTER_KEY` | from config | Shared secret for center + agents. Set the same value on all machines. Takes priority over config. |
+| `VIMIN_CENTER_URL` | from config | Center node URL (used by agents) |
+| `ORCHESTRATOR_API_KEY` | from config | Alternative API key (lower priority than `ORCHESTRATOR_MASTER_KEY`) |
 | `VIMIN_FLEET_TOKEN` | from config | Token for agent registration |
+
+---
+
+## Security
+
+- The center binds to `127.0.0.1` (localhost only) by default. Pass `--host 0.0.0.0` to expose it to the network; a warning is printed when you do.
+- The agent prints a warning if connecting to a non-localhost center over plain HTTP. Use HTTPS for connections across untrusted networks.
+- The agent pins the center URL on first registration and warns if it changes, preventing silent redirections.
+- Task data is never executed as code — it is passed only to inference backends (MLX, llama-cpp, ONNX, Whisper).
+- The fleet token (`VIMIN_FLEET_TOKEN`) restricts which agents can register with your center.
+- The node limit of 10 is enforced at the center; registration is rejected beyond this.
 
 ---
 
@@ -326,10 +468,11 @@ vimin-core/
 ├── src/vimin_core/
 │   ├── cli/          # Command-line interface
 │   ├── core/         # Inference orchestrator, backends, task types
-│   │   └── backends/ # MLX, llama-cpp, ONNX backend implementations
+│   │   └── backends/ # MLX, llama-cpp, ONNX, Whisper backend implementations
 │   ├── hardware/     # Hardware detection and telemetry
 │   ├── systems/      # Center node, agent node, database
 │   └── utils/        # Logging
+├── presets/          # Built-in pipeline JSON files
 ├── pyproject.toml
 └── README.md
 ```
@@ -350,7 +493,7 @@ vimin-core is released under the [Business Source License 1.1](LICENSE).
 
 The license converts to **Apache 2.0** on **2030-04-01**.
 
-For commercial licensing: [hello@vimin.ai](mailto:hello@vimin.ai)
+For commercial licensing: [pberlizov@college.harvard.edu](mailto:pberlizov@college.harvard.edu)
 
 ---
 
@@ -362,11 +505,12 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for how to report bugs, add model aliases
 
 ## vimin (full distribution)
 
-vimin-core is the open-source foundation. The full [vimin](https://vimin.ai) distribution adds:
+vimin-core is the open-source foundation. The full [vimin](https://viminlabs.com) distribution adds:
 
 - Unlimited nodes
-- Per-node task targeting
-- Fleet pipelines and workflow orchestration
+- Per-node task targeting and tag-based routing
+- Fleet pipelines with advanced workflow orchestration
 - OpenClaw integration for device management
+- Role-based access control and audit logging
 - Advanced dashboard and analytics
 - Priority support
