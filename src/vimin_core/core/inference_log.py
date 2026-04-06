@@ -62,6 +62,12 @@ class InferenceLog:
             if len(self._records) > self._max:
                 self._records.pop(0)
     
+    @property
+    def records(self) -> List[InferenceRecord]:
+        """Read-only snapshot of all records (thread-safe)."""
+        with self._lock:
+            return list(self._records)
+
     def get_records(self, last_n: Optional[int] = None) -> List[InferenceRecord]:
         """Get recent records (thread-safe)"""
         with self._lock:

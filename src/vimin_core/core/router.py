@@ -7,42 +7,14 @@ based on hardware telemetry, task complexity, and system conditions.
 
 import time
 import logging
-import json
-import os
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
 
-from ..hardware.telemetry import HardwareTelemetry, SystemMetrics
-from vimin_core.core.task import Task, TaskResult, ExecutionTarget, TaskComplexity
+from vimin_core.hardware.telemetry import HardwareTelemetry, SystemMetrics
+from vimin_core.core.task import Task, TaskResult, ExecutionTarget, TaskComplexity, TaskType
 
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# region agent log
-def _agent_debug_log(message: str, data: Dict[str, Any], hypothesis_id: str) -> None:
-    """Lightweight NDJSON logger for router failover instrumentation."""
-    try:
-        payload = {
-            "id": f"log_{int(time.time()*1000)}",
-            "timestamp": int(time.time() * 1000),
-            "location": "src/core/router.py",
-            "message": message,
-            "data": data,
-            "runId": "pre-fix",
-            "hypothesisId": hypothesis_id,
-        }
-        # Use a portable relative path — works on any machine
-        log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".logs")
-        os.makedirs(log_dir, exist_ok=True)
-        log_path = os.path.join(log_dir, "router_debug.log")
-        with open(log_path, "a") as f:
-            f.write(json.dumps(payload) + "\n")
-    except Exception:
-        # Never let debug logging break routing
-        pass
-# endregion
 
 
 @dataclass
@@ -328,14 +300,24 @@ class ExecutionRouter:
         
         # Apply routing rules
         should_route_local, reasoning = self.rules.should_route_local(task, metrics)
-        
+
+        # In vimin-core there is no cloud worker — always stay local and log a
+        # warning instead of failing with "Cloud worker not configured".
+        if not should_route_local and not self.cloud_worker:
+            logger.warning(
+                "[Router] Cloud routing requested (%s) but no cloud worker is configured — "
+                "falling back to local execution.", reasoning
+            )
+            should_route_local = True
+            reasoning = f"Local fallback (no cloud worker): {reasoning}"
+
         target = ExecutionTarget.LOCAL if should_route_local else ExecutionTarget.CLOUD
         confidence = 0.8 if should_route_local else 0.7
         
         # Visual Telemetry: The "Nginx" Log
         thermal_status = f"{metrics.thermal_state_celsius}°C" if metrics.thermal_state_celsius else "N/A"
-        routing_dest = "Apple Neural Engine" if target == ExecutionTarget.LOCAL else "Cloud (Stub)"
-        print(f"\n[Router] Task: {task.type.value} | Temp: {thermal_status} | Decision: {target.value} ({reasoning})")
+        logger.info("[Router] Task: %s | Temp: %s | Decision: %s (%s)",
+                    task.type.value, thermal_status, target.value, reasoning)
         
         return RoutingDecision(
             target=target,
@@ -369,15 +351,13 @@ class ExecutionRouter:
                 # so the user sees redacted text instead of a Cloud error when no API key is set.
                 if not result.success:
                     logger.warning(f"Local execution failed for task {task.id}, failing over to Cloud")
-                    _agent_debug_log(
-                        "router_local_failover",
-                        {
-                            "task_type": task.type.value if task.type else None,
-                            "local_success": result.success,
-                            "local_execution_time_ms": float(execution_time_ms),
-                            "latency_threshold_ms": float(self.rules.local_latency_threshold_ms),
-                        },
-                        hypothesis_id="H5",
+                    logger.debug(
+                        "router_local_failover task_type=%s local_success=%s "
+                        "local_execution_time_ms=%.1f latency_threshold_ms=%.1f",
+                        task.type.value if task.type else None,
+                        result.success,
+                        float(execution_time_ms),
+                        float(self.rules.local_latency_threshold_ms),
                     )
                     failover_reason = f"Local execution failed: {result.error_message}"
                     cloud_result = self._execute_cloud(task)
@@ -498,35 +478,24 @@ class ExecutionRouter:
         }
 
 
-# Example usage and testing
 if __name__ == "__main__":
-    from task_schema import TaskType
-    
-    # Create router instance
+    import logging as _logging
+    _logging.basicConfig(level=_logging.INFO)
+
     router = ExecutionRouter()
-    
-    # Test routing decisions
+
     test_tasks = [
-        Task(
-            complexity=TaskComplexity.LOW,
-            type=TaskType.PII_MASKING,
-            data="Test low complexity task"
-        ),
-        Task(
-            complexity=TaskComplexity.HIGH,
-            type=TaskType.REASONING,
-            data="Test high complexity task"
-        )
+        Task(complexity=TaskComplexity.LOW,  type=TaskType.PII_MASKING,  data="Low complexity task"),
+        Task(complexity=TaskComplexity.HIGH, type=TaskType.REASONING,    data="High complexity task"),
     ]
-    
+
     print("=== Router Test ===")
     for task in test_tasks:
         decision = router.make_routing_decision(task)
         print(f"Task {task.id}: {decision.target.value} - {decision.reasoning}")
-    
-    # Print system stats
+
     print("\n=== System Stats ===")
     stats = router.get_routing_stats()
-    print(f"Available RAM: {stats['system_metrics']['available_ram_gb']} GB")
-    print(f"CPU Load: {stats['system_metrics']['cpu_load_percent']}%")
-    print(f"NPU Available: {stats['system_metrics']['npu_available']}")
+    print(f"Available RAM : {stats['system_metrics']['available_ram_gb']} GB")
+    print(f"CPU Load      : {stats['system_metrics']['cpu_load_percent']}%")
+    print(f"NPU Available : {stats['system_metrics']['npu_available']}")

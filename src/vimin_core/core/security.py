@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import logging
+from pathlib import Path
 from typing import Dict, Optional, List
 from datetime import datetime
 
@@ -14,7 +15,7 @@ class SecurityManager:
     Supports a Master Key for bootstrapping and individual keys for agents/clients.
     """
     
-    def __init__(self, config_path: str = "security_config.json"):
+    def __init__(self, config_path: str = str(Path.home() / ".vimin" / "security_config.json")):
         self.config_path = config_path
         self.master_key = os.environ.get("ORCHESTRATOR_MASTER_KEY")
         self.keys: Dict[str, Dict] = {}
@@ -36,8 +37,12 @@ class SecurityManager:
     def _save_keys(self):
         """Save registered keys to persistent storage"""
         try:
+            p = Path(self.config_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.parent.chmod(0o700)
             with open(self.config_path, 'w') as f:
                 json.dump({"keys": self.keys, "last_updated": datetime.utcnow().isoformat()}, f, indent=2)
+            p.chmod(0o600)
         except Exception as e:
             logger.error(f"Failed to save security config: {e}")
 

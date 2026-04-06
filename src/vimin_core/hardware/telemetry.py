@@ -16,10 +16,7 @@ import json
 import os
 from typing import Dict, Any, Optional
 from dataclasses import dataclass, field
-try:
-    from vimin_core.hardware.scanner import HardwareScanner, HardwareVendor # type: ignore
-except ImportError:
-    from vimin_core.hardware.scanner import HardwareScanner, HardwareVendor # type: ignore
+from vimin_core.hardware.scanner import HardwareScanner, HardwareVendor  # type: ignore
 
 # Configure logger for this module
 logger = logging.getLogger(__name__)
@@ -84,7 +81,7 @@ class HardwareTelemetry:
             battery = psutil.sensors_battery()
             if battery is None:
                 return None, False
-            return battery.percent, battery.power_plugged
+            return float(battery.percent), battery.power_plugged
         except (AttributeError, OSError):
             # Battery sensors not available on this system
             return None, False
@@ -125,32 +122,7 @@ class HardwareTelemetry:
             self._thermal_cache_time = now
         
         return temp
-    
-    def _read_macos_temperature(self) -> Optional[float]:
-        """Read CPU die temperature on macOS via powermetrics or a simulated fallback"""
-        try:
-            # Try reading from IOKit via a lightweight subprocess
-            result = subprocess.run(
-                ["sysctl", "-n", "machdep.xcpm.cpu_thermal_level"],
-                capture_output=True, text=True, timeout=2
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                # thermal_level is 0-127; map roughly to celsius
-                level = int(result.stdout.strip())
-                # Approximate: level 0 = ~35C, level 127 = ~105C
-                return 35.0 + (level / 127.0) * 70.0
-        except Exception:
-            pass
-        
-        # Fallback: use psutil cpu_percent as a rough proxy
-        # Higher CPU = higher thermal estimate
-        try:
-            cpu = psutil.cpu_percent(interval=None)
-            # Refined for M4: idle ~32C, typical load ~55C, full load ~80C
-            return 32.0 + (cpu / 100.0) * 45.0
-        except Exception:
-            return None
-    
+
     def get_npu_utilization(self) -> float:
         """
         Get current NPU utilization percentage.

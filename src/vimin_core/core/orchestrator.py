@@ -10,9 +10,9 @@ import logging
 from typing import Iterator, List, Optional, Dict, Any
 from dataclasses import dataclass
 
-from vimin_core.core.task import Task, TaskResult
+from vimin_core.core.task import Task, TaskResult, ExecutionTarget
 from vimin_core.hardware.telemetry import HardwareTelemetry, TelemetryCollector
-from vimin_core.core.router import ExecutionRouter
+from vimin_core.core.router import ExecutionRouter, RoutingRules
 from vimin_core.core.local_worker import LocalWorker
 from vimin_core.core.models import ModelRegistry
 from vimin_core.core.inference_log import InferenceLog
@@ -31,7 +31,7 @@ except ImportError:
 class OrchestratorConfig:
     """Configuration for NPU Orchestrator"""
     model_path: Optional[str] = None
-    routing_rules: Optional[Dict[str, Any]] = None
+    routing_rules: Optional[RoutingRules] = None
     max_concurrent_tasks: int = 10
 
 
@@ -239,9 +239,9 @@ class NPUOrchestrator:
                     task_id=task.id,
                     success=False,
                     result="",
-                    execution_time_ms=0,
-                    target="Failed",
-                    error=str(e),
+                    execution_time_ms=0.0,
+                    execution_target=ExecutionTarget.LOCAL,
+                    error_message=str(e),
                     metadata={"error_type": "execution_failed"},
                 ))
         return results
@@ -249,6 +249,12 @@ class NPUOrchestrator:
     # ------------------------------------------------------------------
     # Status
     # ------------------------------------------------------------------
+
+    def cleanup(self) -> None:
+        """Release all resources: unload any loaded model and stop telemetry polling."""
+        self.unload_generative_model()
+        self.telemetry_collector.stop()
+        self.logger.info("NPUOrchestrator cleaned up")
 
     def get_system_status(self) -> Dict[str, Any]:
         metrics = self.telemetry.get_system_metrics()

@@ -2,12 +2,14 @@
 BackendSelector — maps (hardware, model descriptor) to the right execution backend.
 
 Selection priority for generative (autoregressive) tasks:
-  1. Apple Silicon + mlx-lm installed  →  MLXBackend   (ANE + unified memory)
-  2. Any platform + llama-cpp-python   →  LlamaCppBackend (GGUF, CPU/Metal/CUDA)
-  3. Neither available                 →  None (caller should surface install instructions)
+  1. Apple Silicon + mlx-lm installed  →  MLXBackend        (ANE + unified memory)
+  2. Any platform + llama-cpp-python   →  LlamaCppBackend   (GGUF, CPU/Metal/CUDA)
+  3. Neither available                 →  None
 
-Encoder / audio tasks (Whisper, BERT) return None unconditionally — they are
-handled by the existing ONNX pipeline and do not need a generative backend.
+Selection priority for ASR (SPEECH_TO_TEXT) tasks:
+  1. Apple Silicon + mlx-whisper       →  WhisperBackend    (MLX, ANE-accelerated)
+  2. Any platform + faster-whisper     →  FasterWhisperBackend (CTranslate2, CPU/CUDA)
+  3. Neither available                 →  None
 """
 
 from __future__ import annotations
@@ -19,6 +21,9 @@ from typing import Optional
 from vimin_core.core.backends.base import BaseBackend, ModelDescriptor
 from vimin_core.core.backends.mlx_backend import MLXBackend
 from vimin_core.core.backends.llamacpp_backend import LlamaCppBackend
+from vimin_core.core.backends.whisper_backend import WhisperBackend
+from vimin_core.core.backends.faster_whisper_backend import FasterWhisperBackend
+from vimin_core.core.backends.openclaw_backend import OpenClawBackend
 
 logger = logging.getLogger(__name__)
 
@@ -30,15 +35,19 @@ _GENERATIVE_TASKS = frozenset({
     "summarization",
 })
 
-# Tasks that the existing ONNX pipeline handles (no generative backend needed)
+# Tasks handled by the Whisper ASR backend
+_ASR_TASKS = frozenset({
+    "automatic-speech-recognition",
+    "audio-classification",
+})
+
+# Encoder-only tasks (embeddings, classification) — not currently supported
 _ENCODER_TASKS = frozenset({
     "fill-mask",
     "ner",
     "token-classification",
     "feature-extraction",
     "text-classification",
-    "automatic-speech-recognition",
-    "audio-classification",
 })
 
 
@@ -61,27 +70,53 @@ class BackendSelector:
     def __init__(self) -> None:
         self._mlx = MLXBackend()
         self._llamacpp = LlamaCppBackend()
+        self._whisper = WhisperBackend()
+        self._faster_whisper = FasterWhisperBackend()
 
     def needs_generative_backend(self, descriptor: ModelDescriptor) -> bool:
         """
-        Return True if this descriptor requires a generative backend.
-        Returns False for encoder/audio tasks that the ONNX pipeline already handles.
+        Return True if this descriptor requires a generative (autoregressive) backend.
+        Returns False for ASR and encoder-only tasks.
         """
         if descriptor.task in _ENCODER_TASKS:
+            return False
+        if descriptor.task in _ASR_TASKS:
             return False
         if descriptor.format in ("onnx",):
             return False
         return descriptor.task in _GENERATIVE_TASKS or descriptor.format in ("mlx", "gguf")
 
+    def is_asr_task(self, descriptor: ModelDescriptor) -> bool:
+        return descriptor.task in _ASR_TASKS
+
     def select(self, descriptor: ModelDescriptor) -> Optional[BaseBackend]:
         """
-        Return the best available backend for this descriptor, or None if the
-        task should fall through to the existing ONNX pipeline.
+        Return the best available backend for this descriptor, or None if no
+        backend supports it.
 
         Never raises; logs the reason if no backend is available.
         """
+        # ASR: mlx-whisper (Apple Silicon, ANE-accelerated) → faster-whisper (any platform)
+        if self.is_asr_task(descriptor):
+            if _is_apple_silicon() and self._whisper.is_available():
+                logger.info("BackendSelector: ASR task, Apple Silicon → WhisperBackend (MLX)")
+                return self._whisper
+            if self._faster_whisper.is_available():
+                logger.info("BackendSelector: ASR task → FasterWhisperBackend (CTranslate2)")
+                return self._faster_whisper
+            if not _is_apple_silicon() and self._whisper.is_available():
+                # mlx-whisper on non-Apple is unusual but allow it
+                logger.info("BackendSelector: ASR task → WhisperBackend (mlx-whisper)")
+                return self._whisper
+            logger.error(
+                "BackendSelector: no ASR backend available.\n"
+                "  Apple Silicon: pip install 'vimin-core[whisper]'\n"
+                "  Other platforms: pip install faster-whisper"
+            )
+            return None
+
         if not self.needs_generative_backend(descriptor):
-            return None  # ONNX pipeline handles this
+            return None  # encoder-only tasks not currently supported
 
         apple_silicon = _is_apple_silicon()
 
@@ -167,7 +202,12 @@ class BackendSelector:
 
     def available_backends(self) -> dict[str, bool]:
         """Report which backends are installed (useful for dashboard / health check)."""
+        from vimin_core.core.backends.openclaw_backend import OpenClawBackend
+        _openclaw = OpenClawBackend()
         return {
             "mlx": self._mlx.is_available(),
             "llamacpp": self._llamacpp.is_available(),
+            "whisper_mlx": self._whisper.is_available(),
+            "whisper_cpu": self._faster_whisper.is_available(),
+            "openclaw": _openclaw.is_available(),
         }

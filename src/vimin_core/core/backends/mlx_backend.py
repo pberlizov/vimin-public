@@ -30,39 +30,145 @@ logger = logging.getLogger(__name__)
 # All aliases verified public (HTTP 200) as of 2026-03.
 # ---------------------------------------------------------------------------
 _MLX_COMMUNITY_ALIASES: dict[str, str] = {
-    # Llama 3.2
-    "meta-llama/Llama-3.2-1B":                   "mlx-community/Llama-3.2-1B-4bit",
-    "meta-llama/Llama-3.2-1B-Instruct":          "mlx-community/Llama-3.2-1B-Instruct-4bit",
-    "meta-llama/Llama-3.2-3B":                   "mlx-community/Llama-3.2-3B-4bit",
-    "meta-llama/Llama-3.2-3B-Instruct":          "mlx-community/Llama-3.2-3B-Instruct-4bit",
-    # Llama 3.1
-    "meta-llama/Llama-3.1-8B":                   "mlx-community/Meta-Llama-3.1-8B-4bit",
-    "meta-llama/Llama-3.1-8B-Instruct":          "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
-    # Mistral
-    "mistralai/Mistral-7B-Instruct-v0.3":        "mlx-community/Mistral-7B-Instruct-v0.3-4bit",
-    "mistralai/Mistral-7B-v0.3":                 "mlx-community/Mistral-7B-v0.3-4bit",
-    # Gemma 2
-    "google/gemma-2-2b-it":                      "mlx-community/gemma-2-2b-it-4bit",
-    "google/gemma-2-9b-it":                      "mlx-community/gemma-2-9b-it-4bit",
-    # Phi-3.5
-    "microsoft/Phi-3.5-mini-instruct":           "mlx-community/Phi-3.5-mini-instruct-4bit",
-    # Qwen 2.5
-    "Qwen/Qwen2.5-0.5B-Instruct":               "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
-    "Qwen/Qwen2.5-1.5B-Instruct":               "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
-    "Qwen/Qwen2.5-7B-Instruct":                 "mlx-community/Qwen2.5-7B-Instruct-4bit",
-    # SmolLM2 — 4-bit variants are gated; use public fp16 checkpoints instead
-    "HuggingFaceTB/SmolLM2-360M-Instruct":      "mlx-community/SmolLM2-360M-Instruct",
-    "HuggingFaceTB/SmolLM2-1.7B-Instruct":      "mlx-community/SmolLM2-1.7B-Instruct",
+    # ------------------------------------------------------------------
+    # SmolLM2  (HuggingFace — compact, fast edge models)
+    # 4-bit variants are gated; public fp16 checkpoints used instead
+    # ------------------------------------------------------------------
+    "HuggingFaceTB/SmolLM2-360M-Instruct":           "mlx-community/SmolLM2-360M-Instruct",
+    "HuggingFaceTB/SmolLM2-1.7B-Instruct":           "mlx-community/SmolLM2-1.7B-Instruct",
+
+    # ------------------------------------------------------------------
+    # SmolLM3  (HuggingFace — 3B successor with hybrid reasoning + 64K ctx)
+    # ------------------------------------------------------------------
+    "HuggingFaceTB/SmolLM3-3B":                      "mlx-community/SmolLM3-3B-4bit",
+
+    # ------------------------------------------------------------------
+    # Qwen3  (Alibaba — hybrid thinking/non-thinking, 100+ languages)
+    # Dense: toggle chain-of-thought at inference time via enable_thinking
+    # MoE:  30B-A3B activates only 3B params per token → 3B speed, 30B quality
+    # ------------------------------------------------------------------
+    "Qwen/Qwen3-0.6B":                               "mlx-community/Qwen3-0.6B-4bit",
+    "Qwen/Qwen3-1.7B":                               "mlx-community/Qwen3-1.7B-4bit",
+    "Qwen/Qwen3-4B":                                 "mlx-community/Qwen3-4B-4bit",
+    "Qwen/Qwen3-8B":                                 "mlx-community/Qwen3-8B-4bit",
+    "Qwen/Qwen3-14B":                                "mlx-community/Qwen3-14B-4bit",
+    "Qwen/Qwen3-32B":                                "mlx-community/Qwen3-32B-4bit",
+    # MoE: 17.2 GB at 4-bit, runs at 3B token speed on 24 GB+ Mac
+    "Qwen/Qwen3-30B-A3B":                            "mlx-community/Qwen3-30B-A3B-4bit",
+
+    # ------------------------------------------------------------------
+    # Qwen 2.5  (Alibaba — strong multilingual + coding; previous gen)
+    # ------------------------------------------------------------------
+    "Qwen/Qwen2.5-0.5B-Instruct":                    "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+    "Qwen/Qwen2.5-1.5B-Instruct":                    "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
+    "Qwen/Qwen2.5-3B-Instruct":                      "mlx-community/Qwen2.5-3B-Instruct-4bit",
+    "Qwen/Qwen2.5-7B-Instruct":                      "mlx-community/Qwen2.5-7B-Instruct-4bit",
+    "Qwen/Qwen2.5-14B-Instruct":                     "mlx-community/Qwen2.5-14B-Instruct-4bit",
+    # Qwen 2.5 Coder
+    "Qwen/Qwen2.5-Coder-1.5B-Instruct":              "mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit",
+    "Qwen/Qwen2.5-Coder-7B-Instruct":                "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
+    "Qwen/Qwen2.5-Coder-14B-Instruct":               "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit",
+
+    # ------------------------------------------------------------------
+    # DeepSeek-R1 Distill  (original distills — reasoning models from R1)
+    # ------------------------------------------------------------------
+    "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B":     "mlx-community/DeepSeek-R1-Distill-Qwen-1.5B-4bit",
+    "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B":       "mlx-community/DeepSeek-R1-Distill-Qwen-7B-4bit",
+    "deepseek-ai/DeepSeek-R1-Distill-Llama-8B":      "mlx-community/DeepSeek-R1-Distill-Llama-8B-4bit",
+    "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B":      "mlx-community/DeepSeek-R1-Distill-Qwen-14B-4bit",
+    # R1-0528 Qwen3-8B distill — best open 8B reasoning model as of mid-2025
+    "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B":         "mlx-community/DeepSeek-R1-0528-Qwen3-8B-4bit",
+
+    # ------------------------------------------------------------------
+    # Llama 3.2  (Meta — efficient small models)
+    # ------------------------------------------------------------------
+    "meta-llama/Llama-3.2-1B":                       "mlx-community/Llama-3.2-1B-4bit",
+    "meta-llama/Llama-3.2-1B-Instruct":              "mlx-community/Llama-3.2-1B-Instruct-4bit",
+    "meta-llama/Llama-3.2-3B":                       "mlx-community/Llama-3.2-3B-4bit",
+    "meta-llama/Llama-3.2-3B-Instruct":              "mlx-community/Llama-3.2-3B-Instruct-4bit",
+
+    # ------------------------------------------------------------------
+    # Llama 3.1  (Meta — strong 8B general purpose)
+    # ------------------------------------------------------------------
+    "meta-llama/Llama-3.1-8B":                       "mlx-community/Meta-Llama-3.1-8B-4bit",
+    "meta-llama/Llama-3.1-8B-Instruct":              "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
+
+    # ------------------------------------------------------------------
+    # Llama 3.3  (Meta — 70B, requires ~35 GB RAM)
+    # ------------------------------------------------------------------
+    "meta-llama/Llama-3.3-70B-Instruct":             "mlx-community/Llama-3.3-70B-Instruct-4bit",
+
+    # ------------------------------------------------------------------
+    # Mistral  (Mistral AI)
+    # ------------------------------------------------------------------
+    "mistralai/Mistral-7B-v0.3":                     "mlx-community/Mistral-7B-v0.3-4bit",
+    "mistralai/Mistral-7B-Instruct-v0.3":            "mlx-community/Mistral-7B-Instruct-v0.3-4bit",
+    "mistralai/Mistral-Nemo-Instruct-2407":          "mlx-community/Mistral-Nemo-Instruct-2407-4bit",
+
+    # ------------------------------------------------------------------
+    # Gemma 2  (Google — strong open models)
+    # ------------------------------------------------------------------
+    "google/gemma-2-2b-it":                          "mlx-community/gemma-2-2b-it-4bit",
+    "google/gemma-2-9b-it":                          "mlx-community/gemma-2-9b-it-4bit",
+    "google/gemma-2-27b-it":                         "mlx-community/gemma-2-27b-it-4bit",
+
+    # ------------------------------------------------------------------
+    # Gemma 3  (Google — newest generation)
+    # ------------------------------------------------------------------
+    "google/gemma-3-1b-it":                          "mlx-community/gemma-3-1b-it-4bit",
+    "google/gemma-3-4b-it":                          "mlx-community/gemma-3-4b-it-4bit",
+    "google/gemma-3-12b-it":                         "mlx-community/gemma-3-12b-it-4bit",
+    "google/gemma-3-27b-it":                         "mlx-community/gemma-3-27b-it-4bit",
+
+    # ------------------------------------------------------------------
+    # Phi  (Microsoft — compact, strong reasoning)
+    # ------------------------------------------------------------------
+    "microsoft/Phi-3.5-mini-instruct":               "mlx-community/Phi-3.5-mini-instruct-4bit",
+    "microsoft/phi-4":                               "mlx-community/phi-4-4bit",
+    # Phi-4-mini: 3.8B, 128K context, strong math — instruct and reasoning variants
+    "microsoft/Phi-4-mini-instruct":                 "mlx-community/Phi-4-mini-instruct-4bit",
+    "microsoft/Phi-4-mini-reasoning":                "mlx-community/Phi-4-mini-reasoning-4bit",
+    # Phi-4-reasoning: 14B CoT reasoning — plus variant beats DeepSeek-R1-70B on AIME
+    "microsoft/Phi-4-reasoning":                     "mlx-community/Phi-4-reasoning-4bit",
+    "microsoft/Phi-4-reasoning-plus":                "mlx-community/Phi-4-reasoning-plus-4bit",
+
+    # ------------------------------------------------------------------
+    # Mistral Small 3.2  (Mistral AI — 24B, Apache 2.0)
+    # ------------------------------------------------------------------
+    "mistralai/Mistral-Small-3.2-24B-Instruct":      "mlx-community/Mistral-Small-3.2-24B-Instruct-2506-4bit",
+
+    # ------------------------------------------------------------------
+    # Devstral Small  (Mistral + All Hands AI — #1 open SWE-Bench agent)
+    # 24B, 128K context, agentic software engineering, Apache 2.0
+    # ------------------------------------------------------------------
+    "mistralai/Devstral-Small-2505":                 "mlx-community/Devstral-Small-2505-4bit",
 }
 
 # Rough fp16 size in GB, keyed on parameter-count token in the model_id.
+# Sorted longest-first so "12b" matches before "1b", "27b" before "7b", etc.
 # Used as a fallback when estimated_size_gb is not provided.
-_SIZE_HINTS: list[tuple[str, float]] = [
-    ("360m", 0.7), ("0.5b", 1.0), ("1b", 2.0), ("1.5b", 3.0), ("1.7b", 3.5),
+_SIZE_HINTS: list[tuple[str, float]] = sorted([
+    ("360m", 0.7), ("0.5b", 1.0), ("0.6b", 1.2), ("1.5b", 3.0), ("1.7b", 3.5), ("1b", 2.0),
     ("2b", 4.0), ("3b", 6.0), ("4b", 8.0),
-    ("7b", 14.0), ("8b", 16.0), ("9b", 18.0),
-    ("13b", 26.0), ("70b", 140.0),
-]
+    ("70b", 140.0), ("7b", 14.0), ("8b", 16.0), ("9b", 18.0),
+    ("12b", 24.0), ("13b", 26.0), ("14b", 28.0),
+    ("24b", 48.0), ("27b", 54.0), ("30b", 60.0), ("32b", 64.0),
+], key=lambda x: len(x[0]), reverse=True)
+
+# Known fixed sizes for models whose names don't contain a clear Nb token.
+_KNOWN_SIZES: dict[str, float] = {
+    "phi-4-reasoning":            28.0,   # 14B fp16
+    "phi-4-mini":                 7.6,    # 3.8B fp16
+    "phi-4":                      28.0,   # 14B fp16
+    "phi-3.5-mini":               7.6,    # 3.8B fp16
+    "mistral-nemo":               24.0,   # 12B fp16
+    "devstral":                   48.0,   # 24B fp16
+    "mistral-small-3":            48.0,   # 24B fp16
+    "smollm3":                    6.0,    # 3B fp16
+    "smollm2-360m":               0.7,
+    "smollm2-1.7b":               3.5,
+    "qwen3-30b-a3b":              17.2,   # MoE: report actual 4-bit size, not fp16 total
+}
 
 # How much smaller each quantization is relative to fp16
 _QUANT_SCALE: dict[str, float] = {
@@ -72,6 +178,11 @@ _QUANT_SCALE: dict[str, float] = {
 
 def _estimate_fp16_gb(model_id: str) -> float:
     name = model_id.lower()
+    # Check known-size overrides first (models without a clear Nb token)
+    for key, gb in _KNOWN_SIZES.items():
+        if key in name:
+            return gb
+    # Then scan size tokens (longest-first to avoid "1b" shadowing "12b")
     for token, gb in _SIZE_HINTS:
         if token in name:
             return gb
@@ -187,6 +298,22 @@ class MLXBackend(BaseBackend):
             self._loaded_id = None
             return False
 
+    def _apply_chat_template(self, prompt: str) -> str:
+        """
+        Wrap a plain-text prompt in the model's chat template if one is available.
+        Falls back to the raw prompt string for base (non-instruct) models.
+        """
+        try:
+            tok = self._tokenizer
+            if hasattr(tok, "apply_chat_template") and tok.chat_template:
+                messages = [{"role": "user", "content": prompt}]
+                return tok.apply_chat_template(
+                    messages, add_generation_prompt=True, tokenize=False
+                )
+        except Exception:
+            pass
+        return prompt
+
     def generate(
         self,
         prompt: str,
@@ -199,10 +326,11 @@ class MLXBackend(BaseBackend):
         import mlx_lm
         from mlx_lm.sample_utils import make_sampler
         sampler = make_sampler(temp=temperature)
+        formatted = self._apply_chat_template(prompt)
         return mlx_lm.generate(
             self._model,
             self._tokenizer,
-            prompt=prompt,
+            prompt=formatted,
             max_tokens=max_new_tokens,
             sampler=sampler,
             verbose=False,
@@ -220,12 +348,13 @@ class MLXBackend(BaseBackend):
         import mlx_lm
         from mlx_lm.sample_utils import make_sampler
         sampler = make_sampler(temp=temperature)
+        formatted = self._apply_chat_template(prompt)
 
         accumulated = ""
         for response in mlx_lm.stream_generate(
             self._model,
             self._tokenizer,
-            prompt=prompt,
+            prompt=formatted,
             max_tokens=max_new_tokens,
             sampler=sampler,
         ):
@@ -250,7 +379,7 @@ class MLXBackend(BaseBackend):
         self._loaded_id = None
         try:
             import mlx.core as mx
-            mx.metal.clear_cache()
+            mx.clear_cache()
         except Exception:
             pass
         logger.info("MLXBackend: unloaded")

@@ -67,11 +67,16 @@ CREATE TABLE IF NOT EXISTS agents (
 
 def _open(path: str) -> sqlite3.Connection:
     """Open a WAL-mode SQLite connection (creates file + dirs if needed)."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    dir_path = os.path.dirname(path)
+    os.makedirs(dir_path, exist_ok=True)
+    os.chmod(dir_path, 0o700)
     conn = sqlite3.connect(path, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")  # safe with WAL; faster than FULL
+    # Restrict DB file to owner-only after creation
+    if os.path.exists(path):
+        os.chmod(path, 0o600)
     return conn
 
 

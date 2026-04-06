@@ -66,11 +66,11 @@ _GGUF_SOURCES: dict[str, tuple[str, str]] = {
                                                    "SmolLM2-1.7B-Instruct-Q4_K_M.gguf"),
 }
 
-_SIZE_HINTS: list[tuple[str, float]] = [
+_SIZE_HINTS: list[tuple[str, float]] = sorted([
     ("360m", 0.7), ("1b", 2.0), ("1.5b", 3.0), ("1.7b", 3.5),
     ("2b", 4.0), ("3b", 6.0), ("7b", 14.0), ("8b", 16.0),
     ("13b", 26.0), ("70b", 140.0),
-]
+], key=lambda x: len(x[0]), reverse=True)
 
 _QUANT_SCALE: dict[str, float] = {
     "q4_k_m": 0.25, "q4_0": 0.22, "q8_0": 0.5,
