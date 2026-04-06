@@ -1,0 +1,27 @@
+{
+  "name": "Code Review",
+  "description": "Two agents review the same code in parallel (bugs vs security), then a third synthesizes a final verdict.",
+  "notes": "Pass source code or a git diff as --input. Works best with a code-optimised model (e.g. Qwen2.5-Coder-7B-Instruct). Requires at least 2 agents.",
+  "steps": [
+    [
+      {
+        "label": "bugs",
+        "type": "CODE_GENERATION",
+        "data": "Review the following code for logic errors, bugs, and correctness issues. List each problem with a brief explanation and a suggested fix.\n\n```\n{{input}}\n```",
+        "timeout": 120
+      },
+      {
+        "label": "security",
+        "type": "CODE_GENERATION",
+        "data": "Review the following code for security vulnerabilities. Consider: injection attacks, insecure defaults, secrets in code, unsafe deserialization, and missing validation. List each issue with severity (critical/high/medium/low) and a suggested fix.\n\n```\n{{input}}\n```",
+        "timeout": 120
+      }
+    ],
+    {
+      "label": "verdict",
+      "type": "REASONING",
+      "data": "Two reviewers have independently examined the same code. Synthesize their findings into a final code review report with sections: Overall Assessment, Critical Issues (must fix before merge), Non-Critical Issues (should fix), and Verdict (approve/request changes/reject).\n\nBug review:\n{{step1_output}}\n\nSecurity review:\n{{step2_output}}",
+      "timeout": 150
+    }
+  ]
+}

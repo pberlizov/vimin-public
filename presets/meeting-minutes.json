@@ -1,0 +1,26 @@
+{
+  "name": "Meeting Minutes",
+  "description": "Step 1: transcribe audio via Whisper. Step 2: summarize the meeting. Step 3: extract action items.",
+  "notes": "Requires mlx-whisper on at least one agent: pip install 'vimin-core[whisper]'. Pass the audio file path as --input.",
+  "steps": [
+    {
+      "label": "transcribe",
+      "type": "SPEECH_TO_TEXT",
+      "model_id": "openai/whisper-base",
+      "data": "{{input}}",
+      "timeout": 180
+    },
+    {
+      "label": "summarize",
+      "type": "SUMMARIZATION",
+      "data": "Summarize the following meeting transcript. Include: (1) who was present (if mentioned), (2) main topics discussed, (3) decisions made.\n\n{{step1_output}}",
+      "timeout": 120
+    },
+    {
+      "label": "action_items",
+      "type": "CLASSIFICATION",
+      "data": "From the meeting transcript below, extract every action item as a numbered list. For each item include: the task, the person responsible (if mentioned), and the deadline (if mentioned). If no action items were mentioned, say so.\n\nTranscript:\n{{step1_output}}\n\nSummary:\n{{step2_output}}",
+      "timeout": 120
+    }
+  ]
+}

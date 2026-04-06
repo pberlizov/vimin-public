@@ -1,0 +1,24 @@
+{
+  "name": "Analyze and Report",
+  "description": "Step 1: extract key facts (REASONING). Step 2: identify risks and anomalies (REASONING). Step 3: produce a structured executive report (SUMMARIZATION).",
+  "steps": [
+    {
+      "label": "extract",
+      "type": "REASONING",
+      "data": "Read the following document and extract: (a) the key people or entities involved, (b) the sequence of events in chronological order, and (c) any numerical figures (dates, amounts, percentages).\n\n{{input}}",
+      "timeout": 120
+    },
+    {
+      "label": "risks",
+      "type": "REASONING",
+      "data": "Based on these extracted facts, identify the three most significant risks, red flags, or anomalies. For each one explain why it matters:\n\n{{step1_output}}",
+      "timeout": 120
+    },
+    {
+      "label": "report",
+      "type": "SUMMARIZATION",
+      "data": "Using the facts and risk analysis below, write a concise executive report with sections: Summary, Key Findings, Risk Assessment, and Recommended Next Steps.\n\nFacts:\n{{step1_output}}\n\nRisks:\n{{step2_output}}",
+      "timeout": 180
+    }
+  ]
+}

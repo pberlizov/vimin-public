@@ -1,0 +1,19 @@
+{
+  "name": "PII Redact then Summarize",
+  "description": "Step 1: detect and redact PII (names, emails, phones, addresses, IDs). Step 2: summarize the redacted document.",
+  "notes": "PII_MASKING uses the on-device NER model if available, otherwise falls back to LLM-based redaction. All processing stays on-device.",
+  "steps": [
+    {
+      "label": "redact",
+      "type": "PII_MASKING",
+      "data": "{{input}}",
+      "timeout": 120
+    },
+    {
+      "label": "summarize",
+      "type": "SUMMARIZATION",
+      "data": "Summarize the following redacted document in a concise paragraph suitable for sharing with external stakeholders:\n\n{{step1_output}}",
+      "timeout": 120
+    }
+  ]
+}

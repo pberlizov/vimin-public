@@ -1,0 +1,27 @@
+{
+  "name": "Support Ticket Triage",
+  "description": "Two agents run in parallel: one classifies the ticket (category, priority, team), another analyses sentiment. A third drafts the response.",
+  "notes": "Pass the support ticket text as --input. Requires at least 2 agents.",
+  "steps": [
+    [
+      {
+        "label": "classify",
+        "type": "CLASSIFICATION",
+        "data": "Classify the following support ticket. Output JSON with fields: category (billing/technical/account/feature-request/other), priority (critical/high/medium/low), and routing_team (billing/engineering/customer-success/product).\n\nTicket:\n{{input}}",
+        "timeout": 60
+      },
+      {
+        "label": "sentiment",
+        "type": "SENTIMENT_ANALYSIS",
+        "data": "Analyse the sentiment and emotional state of the following support ticket. Output: overall_sentiment (positive/neutral/frustrated/angry/urgent), tone_notes (1-2 sentences describing the customer's state), and escalation_risk (low/medium/high).\n\nTicket:\n{{input}}",
+        "timeout": 60
+      }
+    ],
+    {
+      "label": "response",
+      "type": "TEXT_GENERATION",
+      "data": "You are a helpful support agent. Draft a professional, empathetic response to the following support ticket.\n\nTicket:\n{{input}}\n\nClassification:\n{{step1_output}}\n\nSentiment analysis:\n{{step2_output}}\n\nWrite a response that acknowledges the customer's issue, matches the appropriate tone for their emotional state, and provides a clear next step.",
+      "timeout": 120
+    }
+  ]
+}

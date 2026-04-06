@@ -1,26 +1,46 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+requires = ["setuptools>=40", "wheel"]
+build-backend = "setuptools.build_meta:__legacy__"
 
 [project]
 name = "vimin-core"
 version = "0.1.0"
-description = "Open-source local inference orchestration — up to 10 nodes, broadcast dispatch"
+description = "Open-source local AI inference orchestration — broadcast dispatch and multi-step pipelines across up to 10 nodes"
 requires-python = ">=3.10"
-license = { text = "Apache-2.0" }
+license = { text = "BUSL-1.1" }
 dependencies = [
-    "aiohttp>=3.9",
+    "aiohttp>=3.10",
     "aiohttp-cors>=0.7",
     "psutil>=5.9",
 ]
 
 [project.optional-dependencies]
 # Local inference backends — install at least one
-mlx = ["mlx-lm>=0.16"]
-llamacpp = ["llama-cpp-python>=0.2"]
-onnx = ["onnxruntime>=1.18"]
-# All backends
-all = ["mlx-lm>=0.16", "llama-cpp-python>=0.2", "onnxruntime>=1.18"]
+mlx      = ["mlx-lm>=0.16", "huggingface_hub>=0.20"]
+whisper  = [
+    "mlx-whisper>=0.3; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "faster-whisper>=1.0; sys_platform != 'darwin' or platform_machine != 'arm64'",
+]
+llamacpp = ["llama-cpp-python>=0.2", "huggingface_hub>=0.20"]
+onnx    = ["onnxruntime>=1.18", "numpy>=1.24", "transformers>=4.38"]
+# Optional transport / security features
+secure    = ["cryptography>=41.0"]
+discovery = ["zeroconf>=0.38"]
+# All backends + all optional features
+all = [
+    "mlx-lm>=0.16; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "mlx-whisper>=0.3; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "faster-whisper>=1.0; sys_platform != 'darwin' or platform_machine != 'arm64'",
+    "llama-cpp-python>=0.2",
+    "onnxruntime>=1.18",
+    "huggingface_hub>=0.20",
+    "numpy>=1.24",
+    "transformers>=4.38",
+    "cryptography>=41.0",
+    "zeroconf>=0.38",
+]
+# Development tools
+dev = ["pytest>=8.0", "ruff>=0.4", "mypy>=1.10"]
 
 [project.scripts]
 vimin-core = "vimin_core.cli.main:main"
@@ -30,3 +50,7 @@ where = ["src"]
 
 [tool.setuptools.package-dir]
 "" = "src"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

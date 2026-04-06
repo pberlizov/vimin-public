@@ -1,0 +1,20 @@
+{
+  "name": "Transcribe and Analyze",
+  "description": "Step 1: transcribe an audio file via Whisper (SPEECH_TO_TEXT). Step 2: analyze the transcript with an LLM.",
+  "notes": "Requires mlx-whisper on the agent: pip install 'vimin-core[whisper]'. Pass the audio file path as --input.",
+  "steps": [
+    {
+      "label": "transcribe",
+      "type": "SPEECH_TO_TEXT",
+      "model_id": "openai/whisper-base",
+      "data": "{{input}}",
+      "timeout": 120
+    },
+    {
+      "label": "analyze",
+      "type": "TEXT_GENERATION",
+      "data": "The following is a transcription of a recorded conversation or speech. Identify the main topics discussed, key decisions made, and any action items mentioned:\n\n{{step1_output}}",
+      "timeout": 120
+    }
+  ]
+}
