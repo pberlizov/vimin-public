@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import importlib.resources as _resources
 import os
 import platform
 import sys
@@ -209,13 +210,12 @@ def _cmd_start_center(args) -> int:
     fleet_token = cfg["fleet_token"]
     api_key = cfg["api_key"]
 
-    os.environ.setdefault("VIMIN_FLEET_TOKEN", fleet_token)
-    os.environ.setdefault("ORCHESTRATOR_API_KEY", api_key)
-    # If the user pre-set ORCHESTRATOR_MASTER_KEY, honour it (allows shared
-    # multi-machine secrets). Otherwise fall back to the config api_key so
-    # the displayed key and the validated key are always the same.
-    if not os.environ.get("ORCHESTRATOR_MASTER_KEY"):
-        os.environ["ORCHESTRATOR_MASTER_KEY"] = api_key
+    # Keep the displayed key and the accepted runtime key in sync. The
+    # zero-config flow should never silently authenticate against a different
+    # master key than the one written to ~/.vimin/config.json and shown in the UI.
+    os.environ["VIMIN_FLEET_TOKEN"] = fleet_token
+    os.environ["ORCHESTRATOR_API_KEY"] = api_key
+    os.environ["ORCHESTRATOR_MASTER_KEY"] = api_key
 
     _loopback = {"127.0.0.1", "::1", "localhost"}
     _wildcard  = {"0.0.0.0", "::"}
@@ -289,7 +289,7 @@ def _cmd_start_agent(args) -> int:
     api_key = (os.environ.get("ORCHESTRATOR_MASTER_KEY")
                or os.environ.get("ORCHESTRATOR_API_KEY")
                or cfg.get("api_key", ""))
-    fleet_token = cfg.get("fleet_token") or os.environ.get("VIMIN_FLEET_TOKEN", "")
+    fleet_token = os.environ.get("VIMIN_FLEET_TOKEN") or cfg.get("fleet_token", "")
     center_url = args.center or cfg.get("center_url", "http://localhost:8080")
 
     openclaw_url = None
@@ -486,7 +486,30 @@ def _cmd_broadcast(args) -> int:
     return 0
 
 
-_PRESETS_DIR = Path(__file__).parent.parent.parent.parent / "presets"
+def _preset_root():
+    """Return the installed preset resource root, falling back to the repo tree."""
+    try:
+        return _resources.files("vimin_core").joinpath("presets")
+    except Exception:
+        return Path(__file__).parent.parent.parent.parent / "presets"
+
+
+def _available_preset_names() -> list[str]:
+    root = _preset_root()
+    try:
+        return sorted(
+            p.name[:-5]
+            for p in root.iterdir()
+            if p.name.endswith(".json")
+        )
+    except Exception:
+        return []
+
+
+def _read_preset_text(name: str) -> str:
+    root = _preset_root()
+    preset = root.joinpath(f"{name}.json")
+    return preset.read_text(encoding="utf-8")
 
 
 def _cmd_run_pipeline(args) -> int:
@@ -505,24 +528,28 @@ def _cmd_run_pipeline(args) -> int:
 
     # Load pipeline definition
     pipeline_path = None
+    pipeline_text = None
     if args.pipeline:
         pipeline_path = Path(args.pipeline)
     elif args.preset:
-        pipeline_path = _PRESETS_DIR / f"{args.preset}.json"
-        if not pipeline_path.exists():
-            available = [p.stem for p in _PRESETS_DIR.glob("*.json")] if _PRESETS_DIR.exists() else []
+        try:
+            pipeline_text = _read_preset_text(args.preset)
+        except Exception:
+            available = _available_preset_names()
             print(f"\n  {_P}ERROR{_R}: Preset '{args.preset}' not found.")
             if available:
                 print(f"  Available presets: {', '.join(available)}")
             print(f"  Or use --pipeline <path> to specify a custom pipeline file.\n")
             return 1
 
-    if not pipeline_path:
+    if not pipeline_path and pipeline_text is None:
         print(f"\n  {_P}ERROR{_R}: Provide --pipeline <file> or --preset <name>.\n")
         return 1
 
     try:
-        pipeline = json.loads(pipeline_path.read_text())
+        pipeline = json.loads(
+            pipeline_text if pipeline_text is not None else pipeline_path.read_text(encoding="utf-8")
+        )
     except Exception as e:
         print(f"\n  {_P}ERROR{_R}: Could not read pipeline file: {e}\n")
         return 1
@@ -550,7 +577,7 @@ def _cmd_run_pipeline(args) -> int:
 
     pipeline["mode"] = mode
 
-    name   = pipeline.get("name", pipeline_path.stem)
+    name   = pipeline.get("name", pipeline_path.stem if pipeline_path else (args.preset or "pipeline"))
     nsteps = len(pipeline.get("steps", []))
     mode_label = (
         f"{_W}return{_R} {_D}(results come back to center){_R}"
@@ -606,7 +633,7 @@ def _cmd_run_pipeline(args) -> int:
         print(f"  {_D}Response saved to  {_W}{saved}{_R}\n")
     elif mode == "return":
         ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-        name_slug = pipeline.get("name", pipeline_path.stem).replace(" ", "-")
+        name_slug = pipeline.get("name", pipeline_path.stem if pipeline_path else (args.preset or "pipeline")).replace(" ", "-")
         auto_path = _outputs_dir / f"pipeline-{name_slug}-{ts}.json"
         saved = _write_output(str(auto_path), data)
         print(f"  {_D}Results auto-saved to  {_W}{saved}{_R}\n")

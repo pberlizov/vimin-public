@@ -535,6 +535,8 @@ class CenterNode:
         if identity_error:
             return identity_error
         cmds = self._pending_commands.pop(agent_id, [])
+        if cmds:
+            logger.info(f"Delivering {len(cmds)} pending command(s) to agent {agent_id}")
         return web.json_response({"commands": cmds}, dumps=_dumps)
 
     async def _set_agent_model(self, request):
@@ -1134,6 +1136,10 @@ class CenterNode:
             self.task_queue = [t for t in self.task_queue if t.get("id") != task_id]
             if task_id:
                 asyncio.create_task(self.db.remove_from_queue(task_id))
+            logger.info(
+                f"Task completion received: task={task_id or 'unknown'} agent={agent_id} "
+                f"success={record.get('success', True)}"
+            )
 
             try:
                 with open(self._audit_log_path, "a") as af:
@@ -1482,6 +1488,9 @@ ws.onmessage = e => {
                         "task": task,
                         "data_policy": self._data_policy,
                     })
+                    logger.info(
+                        f"Rebuilt queued task for reconnect delivery: task={task.get('id')} agent={aid}"
+                    )
             queued_count = sum(len(v) for v in self._pending_commands.values())
             logger.info(
                 f"Restored {len(self.agents)} agents (all marked offline pending re-registration), "

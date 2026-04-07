@@ -236,13 +236,21 @@ class UserAgent:
             logger.warning(f"UserAgent: Could not initialize NPUOrchestrator: {e}. Falling back to demo mode.")
             self.orchestrator = None
         
-        # Start background tasks
+        # Register before starting background loops so the center can issue the
+        # per-agent secret first. Otherwise heartbeat / polling can start with
+        # incomplete credentials and spam 401s.
+        registered = await self._register_with_center()
+        if not registered:
+            self.running = False
+            if self.session:
+                await self.session.close()
+                self.session = None
+            raise RuntimeError("Failed to register with center node")
+
+        # Start background tasks only after registration succeeds.
         self.heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         self.metrics_task = asyncio.create_task(self._metrics_collection_loop())
         self.commands_task = asyncio.create_task(self._command_polling_loop())
-        
-        # Register with center node
-        await self._register_with_center()
         
         logger.info("User Agent started successfully")
     
@@ -330,8 +338,8 @@ class UserAgent:
             
         return None
     
-    async def _register_with_center(self):
-        """Register this agent with the center node"""
+    async def _register_with_center(self) -> bool:
+        """Register this agent with the center node."""
         try:
             system_info = self._get_system_info()
             model_status = self._get_model_status()
@@ -364,11 +372,14 @@ class UserAgent:
                         cfg["agent_secret"] = issued_secret
                         save_config(cfg)
                     logger.info("Successfully registered with center node")
+                    return True
                 else:
                     logger.error(f"Failed to register: {response.status}")
+                    return False
         
         except Exception as e:
             logger.error(f"Registration failed: {e}")
+            return False
     
     def _heartbeat_sync(self, url: str, data: dict, headers: dict) -> int:
         """Synchronous urllib heartbeat POST. Returns HTTP status code."""
@@ -481,6 +492,15 @@ class UserAgent:
                     elif cmd_type == 'run_task':
                         task_dict = cmd.get('task', {})
                         data_policy = cmd.get('data_policy', {})
+                        logger.info(
+                            f"Received queued task dispatch: task={task_dict.get('id') or task_dict.get('task_id')} "
+                            f"type={task_dict.get('type')} save_local={task_dict.get('metadata', {}).get('save_local', False)}"
+                        )
+                        print(
+                            f"[vimin] Task dispatch received: {task_dict.get('id') or task_dict.get('task_id')} "
+                            f"({task_dict.get('type', 'unknown')})",
+                            flush=True,
+                        )
                         # Decrypt data field if the center node encrypted it
                         raw_data = task_dict.get('data', '')
                         if task_dict.get('encrypted') and self._fernet and raw_data:
@@ -1090,6 +1110,10 @@ class UserAgent:
         url = f"{self.center_node_url}/api/agents/task-completion"
         try:
             await asyncio.to_thread(self._post_completion_sync, url, payload, headers)
+            logger.info(
+                f"Reported task completion: task={task_record.get('task_id') or task_record.get('id')} "
+                f"success={task_record.get('success', True)}"
+            )
         except Exception as e:
             logger.warning(f"Failed to report task completion (buffering locally): {e}")
             self._buffer_locally("/api/agents/task-completion", payload)

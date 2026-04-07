@@ -1,0 +1,19 @@
+{
+  "name": "Translate and Summarize",
+  "description": "Step 1: translate the document to English. Step 2: produce a concise English summary.",
+  "notes": "Pass the source-language document as --input. Specify the source language in --input or let the model auto-detect it.",
+  "steps": [
+    {
+      "label": "translate",
+      "type": "TRANSLATION",
+      "data": "Translate the following text to English. Output only the translated text, without preamble.\n\n{{input}}",
+      "timeout": 180
+    },
+    {
+      "label": "summarize",
+      "type": "SUMMARIZATION",
+      "data": "Summarize the following text in 3-5 concise sentences, capturing the key points:\n\n{{step1_output}}",
+      "timeout": 120
+    }
+  ]
+}

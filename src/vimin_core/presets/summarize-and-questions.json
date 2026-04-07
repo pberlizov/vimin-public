@@ -1,0 +1,18 @@
+{
+  "name": "Summarize and Generate Questions",
+  "description": "Step 1: summarize the document. Step 2: generate follow-up questions based on the summary.",
+  "steps": [
+    {
+      "label": "summarize",
+      "type": "SUMMARIZATION",
+      "data": "Summarize the following document in 3-5 sentences:\n\n{{input}}",
+      "timeout": 120
+    },
+    {
+      "label": "questions",
+      "type": "REASONING",
+      "data": "Based on this summary, generate 5 insightful follow-up questions that an investigator or analyst would want answered:\n\n{{step1_output}}",
+      "timeout": 120
+    }
+  ]
+}

@@ -1311,6 +1311,12 @@ class TestOpenClawBackend:
         assert os.environ.get("OPENCLAW_URL") == "http://127.0.0.1:18789"
 
 
+class TestCliPresetPackaging:
+    def test_parallel_perspectives_preset_is_packaged(self):
+        from vimin_core.cli.main import _available_preset_names
+        assert "parallel-perspectives" in _available_preset_names()
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 20. ROUTING & ORCHESTRATOR
 # ═══════════════════════════════════════════════════════════════════════════════

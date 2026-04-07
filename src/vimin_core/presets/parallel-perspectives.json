@@ -1,0 +1,27 @@
+{
+  "name": "Parallel Perspectives",
+  "description": "Two agents analyze the same document simultaneously from opposing viewpoints (REASONING in parallel), then a third synthesizes a balanced assessment.",
+  "notes": "Requires at least 2 agents. Demonstrtes heterogeneous parallel inference across the fleet.",
+  "steps": [
+    [
+      {
+        "label": "defense",
+        "type": "REASONING",
+        "data": "Analyze this document from the perspective of a defense attorney. What exculpatory evidence, alternative explanations, or weaknesses in the case exist?\n\n{{input}}",
+        "timeout": 120
+      },
+      {
+        "label": "prosecution",
+        "type": "REASONING",
+        "data": "Analyze this document from the perspective of a prosecutor. What is the strongest case for wrongdoing? What evidence is most damaging?\n\n{{input}}",
+        "timeout": 120
+      }
+    ],
+    {
+      "label": "synthesis",
+      "type": "SUMMARIZATION",
+      "data": "Two analysts have independently reviewed the same document from opposing angles. Synthesize their perspectives into a balanced assessment with sections: Strongest Evidence of Wrongdoing, Strongest Counter-Arguments, and Overall Assessment.\n\nDefense analysis:\n{{step1_output}}\n\nProsecution analysis:\n{{step2_output}}",
+      "timeout": 150
+    }
+  ]
+}

@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import shutil
 from typing import Iterator, List, Optional
+from pathlib import Path
 
 from vimin_core.core.backends.base import BaseBackend, InsufficientMemoryError, ModelDescriptor
 
@@ -215,6 +217,17 @@ def _cached_local_path(model_id: str) -> Optional[str]:
         return None
 
 
+def _clear_broken_cache(local_path: str) -> None:
+    """Delete a broken local HF snapshot so the next load can redownload cleanly."""
+    try:
+        snapshot_dir = Path(local_path)
+        model_root = snapshot_dir.parent.parent
+        if model_root.name.startswith("models--"):
+            shutil.rmtree(model_root, ignore_errors=True)
+    except Exception as exc:
+        logger.warning(f"MLXBackend: failed to clear broken cache at {local_path}: {exc}")
+
+
 class MLXBackend(BaseBackend):
     """
     Generative inference on Apple Silicon via mlx-lm.
@@ -293,6 +306,18 @@ class MLXBackend(BaseBackend):
             logger.info(f"MLXBackend: ready — {resolved}")
             return True
         except Exception as exc:
+            if local_path and "No safetensors found" in str(exc):
+                logger.warning(
+                    f"MLXBackend: detected incomplete cache for '{resolved}', clearing and retrying download"
+                )
+                _clear_broken_cache(local_path)
+                try:
+                    self._model, self._tokenizer = mlx_lm.load(resolved)
+                    self._loaded_id = resolved
+                    logger.info(f"MLXBackend: ready after cache repair — {resolved}")
+                    return True
+                except Exception as retry_exc:
+                    exc = retry_exc
             logger.error(f"MLXBackend: load failed for '{resolved}': {exc}")
             self._model = None
             self._tokenizer = None
