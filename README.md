@@ -2,24 +2,24 @@
 
 # vimin-core
 
-Source-available local AI inference orchestration. Run open-source LLMs and speech models across up to **10 machines** — no cloud services, generated local credentials, and no data leaving your hardware unless you choose to return results to the center.
+Source-available local AI inference orchestration for up to **10 machines**. Run open-source LLMs and speech models without a cloud service, with local credentials and local execution by default.
 
 ## What it does
 
 vimin-core lets you coordinate a fleet of machines (laptops, desktops, Mac minis, servers) to run local AI inference together. You start a **center node** on one machine as the orchestration hub, then connect **agent nodes** on each machine that will run models.
 
-**Two ways to use it:**
+**Two ways to use it**
 
-- **Broadcast** — send a prompt to all connected agents simultaneously and collect every response. Good for parallel reasoning, model comparison, or redundant inference.
-- **Pipelines** — run multi-step workflows where each step is a different task type (translation, PII masking, speech-to-text, summarization, classification, etc.) and output from one step feeds the next.
+- **Broadcast**: send a prompt to all connected agents at once and collect every response.
+- **Pipelines**: run multi-step workflows where each step uses a different task type and feeds into the next.
 
 **Task types:**
 
 | Type | What runs it |
 |------|-------------|
 | `TEXT_GENERATION`, `SUMMARIZATION`, `REASONING`, `TRANSLATION`, `CODE_GENERATION`, `CLASSIFICATION`, `SENTIMENT_ANALYSIS` | The loaded LLM (MLX or llama-cpp) |
-| `PII_MASKING` | ONNX NER model, regex scrubber, or LLM fallback — nothing leaves the device |
-| `SPEECH_TO_TEXT` | Whisper — mlx-whisper on Apple Silicon, faster-whisper on all other platforms |
+| `PII_MASKING` | ONNX NER model, regex scrubber, or LLM fallback. Data stays on the device. |
+| `SPEECH_TO_TEXT` | Whisper. `mlx-whisper` on Apple Silicon, `faster-whisper` on other platforms. |
 
 **Use cases:**
 - Parallel inference across multiple machines for higher throughput
@@ -29,13 +29,13 @@ vimin-core lets you coordinate a fleet of machines (laptops, desktops, Mac minis
 - Offline AI workflows in air-gapped or privacy-sensitive environments
 - Comparing outputs from different models side-by-side
 
-**Limits in vimin-core (source-available edition):**
+**Limits in vimin-core**
 - Maximum 10 nodes
-- No per-node targeting — pipelines use basic center-driven scheduling
+- No per-node targeting. Pipelines use basic center-driven scheduling.
 - No role-based access control or compliance-grade audit reporting
 - No enterprise dashboard
 
-For larger fleets, per-node routing, and production features, see [viminlabs.com](https://viminlabs.com).
+More about the advanced version is on the website: [viminlabs.com](https://viminlabs.com).
 
 ---
 
@@ -50,7 +50,7 @@ pip install "vimin-core[mlx] @ git+https://github.com/pberlizov/vimin-public.git
 # Apple Silicon voice / speech-to-text (Whisper)
 pip install "vimin-core[whisper] @ git+https://github.com/pberlizov/vimin-public.git"
 
-# Any platform — CPU, CUDA, or Apple Metal via GGUF
+# Any platform: CPU, CUDA, or Apple Metal via GGUF
 pip install "vimin-core[llamacpp] @ git+https://github.com/pberlizov/vimin-public.git"
 
 # Everything
@@ -116,7 +116,7 @@ On the same machine (or any machine with network access to the center):
 # Same machine
 vimin-core start-agent
 
-# Remote machine — pass center's LAN IP
+# Remote machine: pass the center's LAN IP
 vimin-core start-agent --center http://192.168.1.10:8080
 
 # Or via environment variable
@@ -129,7 +129,7 @@ Agents also run as background daemons by default. Watch agent logs:
 tail -f ~/.vimin/logs/agent-*.log
 ```
 
-**Agent ID persistence:** Each agent is assigned a stable ID on first run, saved to `~/.vimin/config.json`. If an agent disconnects and reconnects, it uses the same ID — so tasks queued while it was offline are delivered automatically on reconnect.
+**Agent ID persistence:** Each agent gets a stable ID on first run and saves it to `~/.vimin/config.json`. If it disconnects and reconnects, queued tasks can still be delivered to the same machine.
 
 **Graceful shutdown:** When you run `vimin-core stop-agent`, the agent sends a goodbye heartbeat to the center before exiting. The node slot is freed immediately rather than waiting for a heartbeat timeout.
 
@@ -139,9 +139,9 @@ tail -f ~/.vimin/logs/agent-*.log
 vimin-core broadcast "What is the capital of Japan?" --mode return
 ```
 
-`--mode return` sends results back to your terminal and **auto-saves them** to `~/.vimin/outputs/broadcast-YYYYMMDD-HHMMSS.json`. `--mode broadcast` runs inference and saves results on the edge device only — nothing comes back to the center.
+`--mode return` sends results back to your terminal and auto-saves them to `~/.vimin/outputs/broadcast-YYYYMMDD-HHMMSS.json`. `--mode broadcast` runs inference and saves results on the edge device only.
 
-**Offline queuing:** If an agent is offline when a broadcast goes out, the task is queued durably at the center. When that agent reconnects (using its persistent ID), the queued task is dispatched automatically. The result is not sent back to the original broadcast caller — it is written to the agent's log and the center's audit log.
+**Offline queuing:** If an agent is offline when a broadcast goes out, the task stays queued at the center. When that agent reconnects, the queued task is dispatched automatically. The result is written to the agent log and the center audit log.
 
 To find offline task results:
 ```bash
@@ -161,7 +161,7 @@ vimin-core run-pipeline \
   --input "El banco central anunció una subida de tipos de interés del 0,25%." \
   --mode return
 
-# Redact PII from a document, then summarize — nothing leaves the device
+# Redact PII from a document, then summarize locally
 vimin-core run-pipeline \
   --preset pii-redact-then-summarize \
   --file patient_record.txt \
@@ -189,7 +189,7 @@ vimin-core run-pipeline \
 | `support-triage` | parallel [`CLASSIFICATION`, `SENTIMENT_ANALYSIS`] → `TEXT_GENERATION` | Classify and score sentiment in parallel, then draft a response |
 | `transcribe-and-analyze` | `SPEECH_TO_TEXT` → `TEXT_GENERATION` | Transcribe audio, then analyze the content |
 | `meeting-minutes` | `SPEECH_TO_TEXT` → `SUMMARIZATION` → `CLASSIFICATION` | Full meeting minutes: transcript → summary → action items |
-| `parallel-perspectives` | grouped [`REASONING`, `REASONING`] → `SUMMARIZATION` | Two reasoning tasks are launched together, then a final summarization step synthesizes them |
+| `parallel-perspectives` | grouped [`REASONING`, `REASONING`] → `SUMMARIZATION` | Two reasoning tasks run together, then a final summarization step combines them |
 
 Pass a file or inline text with `--file` or `--input`. Audio files (`.wav`, `.mp3`, `.m4a`, etc.) are automatically routed as paths for `SPEECH_TO_TEXT` steps.
 
@@ -245,13 +245,13 @@ Use these to inspect enrolled agents, their status, joined time, loaded model, a
 
 ## Supported Models
 
-vimin-core ships with built-in aliases for the models below — pass the canonical HuggingFace ID and the right 4-bit MLX checkpoint is loaded automatically. Any other `mlx-community/` checkpoint also works by passing it directly.
+vimin-core ships with built-in aliases for the models below. Pass the canonical HuggingFace ID and the matching 4-bit MLX checkpoint is loaded automatically. Any other `mlx-community/` checkpoint also works if you pass it directly.
 
-### Text — Apple Silicon (MLX backend)
+### Text: Apple Silicon (MLX backend)
 
 4-bit quantised checkpoints load from the `mlx-community` org automatically. No manual conversion needed. Install with `pip install 'vimin-core[mlx]'`.
 
-**Compact (≤ 2 GB RAM — fits on any modern Mac)**
+**Compact (≤ 2 GB RAM, fits on any modern Mac)**
 
 | Model | Params | RAM (4-bit) | Notes |
 |-------|--------|-------------|-------|
@@ -264,7 +264,7 @@ vimin-core ships with built-in aliases for the models below — pass the canonic
 | `Qwen/Qwen3-1.7B` | 1.7B | ~1.5 GB | Qwen3; fast with reasoning support |
 | `HuggingFaceTB/SmolLM2-1.7B-Instruct` | 1.7B | ~1.5 GB | Compact general purpose |
 
-**Mid-range (2–6 GB RAM — 8 GB+ Mac recommended)**
+**Mid-range (2–6 GB RAM, 8 GB+ Mac recommended)**
 
 | Model | Params | RAM (4-bit) | Notes |
 |-------|--------|-------------|-------|
@@ -278,7 +278,7 @@ vimin-core ships with built-in aliases for the models below — pass the canonic
 | `microsoft/Phi-3.5-mini-instruct` | 3.8B | ~3 GB | Microsoft; strong reasoning |
 | `Qwen/Qwen2.5-Coder-1.5B-Instruct` | 1.5B | ~1 GB | Code-optimised |
 
-**Standard (6–10 GB RAM — 16 GB Mac recommended)**
+**Standard (6–10 GB RAM, 16 GB Mac recommended)**
 
 | Model | Params | RAM (4-bit) | Notes |
 |-------|--------|-------------|-------|
@@ -295,7 +295,7 @@ vimin-core ships with built-in aliases for the models below — pass the canonic
 | `google/gemma-2-9b-it` | 9B | ~7 GB | Google; strong instruction following |
 | `google/gemma-3-12b-it` | 12B | ~9 GB | Gemma 3 mid-range |
 
-**Large (12–40 GB RAM — Mac Studio / Pro / server)**
+**Large (12–40 GB RAM, Mac Studio / Pro / server)**
 
 | Model | Params | RAM (4-bit) | Notes |
 |-------|--------|-------------|-------|
@@ -314,12 +314,12 @@ vimin-core ships with built-in aliases for the models below — pass the canonic
 | `google/gemma-3-27b-it` | 27B | ~20 GB | Gemma 3 flagship |
 | `meta-llama/Llama-3.3-70B-Instruct` | 70B | ~42 GB | Frontier-class open model |
 
-### Voice — Speech-to-Text (Whisper)
+### Voice: Speech-to-Text (Whisper)
 
 Install with `pip install 'vimin-core[whisper]'`. The right backend is chosen automatically:
 
-- **Apple Silicon** — `mlx-whisper` (ANE-accelerated, fastest)
-- **Linux / Windows / Intel Mac** — `faster-whisper` (CTranslate2, CPU or CUDA)
+- **Apple Silicon**: `mlx-whisper` (ANE-accelerated, fastest)
+- **Linux / Windows / Intel Mac**: `faster-whisper` (CTranslate2, CPU or CUDA)
 
 Pass `openai/whisper-*` IDs on any platform:
 
@@ -421,7 +421,7 @@ List all registered agents and their status.
 
 ### `GET /api/health`
 
-Health check — returns center uptime and node count.
+Health check. Returns center uptime and node count.
 
 ---
 
@@ -458,7 +458,7 @@ After an agent first connects, a `pinned_center_url` key is added automatically.
 - The center binds to `127.0.0.1` (localhost only) by default. Pass `--host 0.0.0.0` to expose it to the network; a warning is printed when you do.
 - The agent prints a warning if connecting to a non-localhost center over plain HTTP. Use HTTPS for connections across untrusted networks.
 - The agent pins the center URL on first registration and warns if it changes, preventing silent redirections.
-- Task data is never executed as code — it is passed only to inference backends (MLX, llama-cpp, ONNX, Whisper).
+- Task data is never executed as code. It is passed only to inference backends (MLX, llama-cpp, ONNX, Whisper).
 - The fleet token (`VIMIN_FLEET_TOKEN`) restricts which agents can register with your center.
 - Each enrolled agent also receives a per-agent secret on first registration. Future heartbeats, command polling, and reconnects must present that secret, preventing one enrolled node from impersonating another by reusing only the shared fleet credential.
 - The node limit of 10 is enforced at the center; registration is rejected beyond this.
@@ -467,7 +467,7 @@ After an agent first connects, a `pinned_center_url` key is added automatically.
 
 ## Hardware Requirements
 
-**Center node:** Any machine with Python 3.10+ and network access. Minimal CPU/RAM needed — it only routes tasks.
+**Center node:** Any machine with Python 3.10+ and network access. It only routes tasks, so CPU and RAM needs are modest.
 
 **Agent nodes:**
 
@@ -522,9 +522,11 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for how to report bugs, add model aliases
 
 ---
 
-## vimin (full distribution)
+## vimin
 
-vimin-core is the source-available foundation. The full [vimin](https://viminlabs.com) distribution adds:
+vimin-core is the source-available foundation. The more advanced version of vimin is described on the website: [viminlabs.com](https://viminlabs.com).
+
+That version adds:
 
 - Unlimited nodes
 - Per-node task targeting and tag-based routing
