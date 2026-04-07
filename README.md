@@ -415,14 +415,13 @@ Settings are stored in `~/.vimin/config.json`:
   "api_key": "auto-generated",
   "fleet_token": "auto-generated",
   "agent_id": "auto-generated",
-  "center_url": "http://localhost:8080",
-  "pinned_center_url": "http://localhost:8080"
+  "center_url": "http://localhost:8080"
 }
 ```
 
 `agent_id` is generated once and reused across restarts so the center can match a reconnecting agent to its queued tasks.
 
-`pinned_center_url` is written by the agent on first registration. If the center URL changes on a subsequent run, the agent prints a warning. Delete the key to reset.
+After an agent first connects, a `pinned_center_url` key is added automatically. If the center URL changes on a subsequent run, the agent prints a warning. Delete that key to reset.
 
 ### Environment variables
 
