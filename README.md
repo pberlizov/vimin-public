@@ -60,7 +60,7 @@ pip install 'vimin-core[all]'
 Or install directly from GitHub:
 
 ```bash
-pip install "vimin-core[mlx,whisper,secure,discovery] @ git+https://github.com/pberlizov/vimin-public.git"
+pip install "vimin-core[mlx] @ git+https://github.com/pberlizov/vimin-public.git#subdirectory=vimin-core"
 ```
 
 ### 2. Start the center node
