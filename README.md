@@ -35,7 +35,7 @@ vimin-core lets you coordinate a fleet of machines (laptops, desktops, Mac minis
 - No role-based access control or audit logging
 - No enterprise dashboard
 
-For larger fleets, per-node routing, and production features, see [vimin](https://viminlabs.com).
+For larger fleets, per-node routing, and production features, see [viminlabs.com](https://viminlabs.com).
 
 ---
 
@@ -514,3 +514,5 @@ vimin-core is the open-source foundation. The full [vimin](https://viminlabs.com
 - Role-based access control and audit logging
 - Advanced dashboard and analytics
 - Priority support
+
+[viminlabs.com](https://viminlabs.com)
