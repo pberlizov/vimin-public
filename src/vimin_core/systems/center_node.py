@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import time
 import uuid
 from collections import defaultdict, deque
@@ -89,14 +90,19 @@ class AgentInfo:
     capabilities: Dict[str, Any]
     registered_at: str
     last_heartbeat: str
+    first_seen_at: Optional[str] = None
     status: str = "online"
     metrics_history: Optional[List[Dict[str, Any]]] = None
     session_key: Optional[str] = None
     loaded_model_id: Optional[str] = None
+    agent_secret_hash: Optional[str] = None
+    revoked_at: Optional[str] = None
 
     def __post_init__(self):
         if self.metrics_history is None:
             self.metrics_history = []
+        if self.first_seen_at is None:
+            self.first_seen_at = self.registered_at
 
 
 @dataclass
@@ -187,9 +193,11 @@ class CenterNode:
         r.add_get("/api/agents/{agent_id}", self._get_agent)
         r.add_get("/api/agents/{agent_id}/pending-commands", self._get_pending_commands)
         r.add_post("/api/agents/{agent_id}/set-model", self._set_agent_model)
+        r.add_post("/api/agents/{agent_id}/revoke", self._revoke_agent)
         # Tasks
         r.add_post("/api/tasks", self._submit_task)
         r.add_get("/api/tasks", self._get_tasks)
+        r.add_post("/api/tasks/clear", self._clear_tasks)
         r.add_get("/api/tasks/{task_id}", self._get_task)
         r.add_post("/api/tasks/{task_id}/stop", self._stop_task)
         # Broadcast dispatch
@@ -219,6 +227,45 @@ class CenterNode:
         })
         for route in list(self.app.router.routes()):
             cors.add(route)
+
+    def _extract_agent_secret(self, request, data: Optional[Dict[str, Any]] = None) -> str:
+        secret = request.headers.get("X-Vimin-Agent-Secret", "")
+        if secret:
+            return secret
+        if isinstance(data, dict):
+            return str(data.get("agent_secret", "") or "")
+        return ""
+
+    def _validate_agent_identity(
+        self,
+        agent_id: str,
+        agent_secret: str,
+        allow_bootstrap: bool = False,
+    ) -> Optional[web.Response]:
+        agent = self.agents.get(agent_id)
+        if not agent:
+            return None if allow_bootstrap else _err("not_found", f"Agent '{agent_id}' not found", 404)
+        if agent.status == "revoked" or agent.revoked_at:
+            return _err("agent_revoked", f"Agent '{agent_id}' has been revoked.", 403)
+        if not agent.agent_secret_hash:
+            return None if allow_bootstrap else _err("agent_secret_required", "Agent secret required.", 403)
+        if not self.security.verify_secret(agent_secret, agent.agent_secret_hash):
+            return _err("invalid_agent_secret", "Agent secret mismatch.", 403)
+        return None
+
+    def _agent_task_summary(self, agent_id: str) -> Dict[str, int]:
+        queued = sum(1 for t in self.task_queue if t.get("assigned_agent") == agent_id)
+        completed = sum(1 for t in self.task_history if t.get("agent_id") == agent_id)
+        failed = sum(
+            1 for t in self.task_history
+            if t.get("agent_id") == agent_id and not t.get("success", True)
+        )
+        return {
+            "queued": queued,
+            "completed": completed,
+            "failed": failed,
+            "received_total": queued + completed,
+        }
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -320,6 +367,7 @@ class CenterNode:
         try:
             data = json.loads(await request.read())
             agent_id = data["agent_id"]
+            agent_secret = self._extract_agent_secret(request, data)
 
             # Fleet token check
             if self._fleet_token:
@@ -344,6 +392,21 @@ class CenterNode:
                     403,
                 )
 
+            issued_secret: Optional[str] = None
+            existing = self.agents.get(agent_id)
+            if existing:
+                identity_error = self._validate_agent_identity(agent_id, agent_secret, allow_bootstrap=False)
+                if identity_error:
+                    return identity_error
+                first_seen_at = existing.first_seen_at
+                agent_secret_hash = existing.agent_secret_hash
+                revoked_at = existing.revoked_at
+            else:
+                issued_secret = secrets.token_urlsafe(32)
+                first_seen_at = data["timestamp"]
+                agent_secret_hash = self.security.hash_secret(issued_secret)
+                revoked_at = None
+
             agent = AgentInfo(
                 agent_id=agent_id,
                 system_info=data["system_info"],
@@ -352,6 +415,9 @@ class CenterNode:
                 capabilities=data["capabilities"],
                 registered_at=data["timestamp"],
                 last_heartbeat=data["timestamp"],
+                first_seen_at=first_seen_at,
+                agent_secret_hash=agent_secret_hash,
+                revoked_at=revoked_at,
             )
             self.agents[agent_id] = agent
             asyncio.create_task(self.db.upsert_agent(agent))
@@ -359,7 +425,10 @@ class CenterNode:
             logger.info(f"Agent registered: {agent_id} ({online_now}/{MAX_NODES} online nodes)")
 
             await self._broadcast_update({"type": "agent_registered", "data": asdict(agent)})
-            return web.json_response({"status": "success", "agent_id": agent_id})
+            response = {"status": "success", "agent_id": agent_id}
+            if issued_secret:
+                response["agent_secret"] = issued_secret
+            return web.json_response(response)
 
         except Exception as e:
             logger.error(f"Registration error: {e}")
@@ -372,6 +441,11 @@ class CenterNode:
         try:
             data = json.loads(await request.read())
             agent_id = data["agent_id"]
+            identity_error = self._validate_agent_identity(
+                agent_id, self._extract_agent_secret(request, data)
+            )
+            if identity_error:
+                return identity_error
             if agent_id in self.agents:
                 agent = self.agents[agent_id]
                 agent.last_heartbeat = data["timestamp"]
@@ -380,7 +454,7 @@ class CenterNode:
                 if "loaded_model_id" in data:
                     agent.loaded_model_id = data["loaded_model_id"]
                 asyncio.create_task(self.db.update_agent_heartbeat(
-                    agent_id, data["timestamp"], "online", agent.loaded_model_id
+                    agent_id, data["timestamp"], agent.status, agent.loaded_model_id
                 ))
             return web.json_response({"status": "success"})
         except Exception as e:
@@ -394,6 +468,11 @@ class CenterNode:
         try:
             data = json.loads(await request.read())
             agent_id = data["agent_id"]
+            identity_error = self._validate_agent_identity(
+                agent_id, self._extract_agent_secret(request, data)
+            )
+            if identity_error:
+                return identity_error
             if agent_id in self.agents:
                 history = self.agents[agent_id].metrics_history or []
                 history.append(data["metrics"])
@@ -418,6 +497,10 @@ class CenterNode:
                 "status": a.status,
                 "last_heartbeat": a.last_heartbeat,
                 "registered_at": a.registered_at,
+                "first_seen_at": a.first_seen_at,
+                "loaded_model_id": a.loaded_model_id,
+                "revoked_at": a.revoked_at,
+                "task_summary": self._agent_task_summary(aid),
             }
             for aid, a in self.agents.items()
         ]
@@ -433,7 +516,11 @@ class CenterNode:
         agent = self.agents[agent_id]
         latest_metrics = agent.metrics_history[-1] if agent.metrics_history else None
         return web.json_response(
-            {"agent_info": asdict(agent), "latest_metrics": latest_metrics},
+            {
+                "agent_info": asdict(agent),
+                "latest_metrics": latest_metrics,
+                "task_summary": self._agent_task_summary(agent_id),
+            },
             dumps=_dumps,
         )
 
@@ -442,6 +529,11 @@ class CenterNode:
         if not auth:
             return _err("unauthorized", "Valid API key required.", 401)
         agent_id = request.match_info["agent_id"]
+        identity_error = self._validate_agent_identity(
+            agent_id, self._extract_agent_secret(request)
+        )
+        if identity_error:
+            return identity_error
         cmds = self._pending_commands.pop(agent_id, [])
         return web.json_response({"commands": cmds}, dumps=_dumps)
 
@@ -461,6 +553,33 @@ class CenterNode:
         except Exception as e:
             logger.error(f"set-model error: {e}")
             return _err("internal_error", "An internal error occurred.", 500)
+
+    async def _revoke_agent(self, request):
+        auth = self._authenticate(request)
+        if not auth or not auth.get("is_master"):
+            return _err("forbidden", "Master key required.", 403)
+        agent_id = request.match_info["agent_id"]
+        agent = self.agents.get(agent_id)
+        if not agent:
+            return _err("not_found", f"Agent '{agent_id}' not found", 404)
+
+        revoked_at = get_utc_iso()
+        agent.status = "revoked"
+        agent.revoked_at = revoked_at
+        agent.agent_secret_hash = None
+        self._pending_commands.pop(agent_id, None)
+        self.task_queue = [t for t in self.task_queue if t.get("assigned_agent") != agent_id]
+        await self.db.upsert_agent(agent)
+        await self.db.remove_tasks_for_agent(agent_id)
+        await self._broadcast_update({
+            "type": "agent_revoked",
+            "data": {"agent_id": agent_id, "revoked_at": revoked_at},
+        })
+        return web.json_response({
+            "status": "success",
+            "agent_id": agent_id,
+            "revoked_at": revoked_at,
+        })
 
     # ------------------------------------------------------------------
     # Task endpoints
@@ -586,6 +705,7 @@ class CenterNode:
                     "broadcast_id": broadcast_id,
                 }
                 self.task_queue.append(task)
+                asyncio.create_task(self.db.save_task_queue(task))
                 self._pending_commands.setdefault(agent_id, []).append({
                     "type": "run_task",
                     "task": task,
@@ -735,6 +855,7 @@ class CenterNode:
             "pipeline_id": pipeline_id,
         }
         self.task_queue.append(task)
+        asyncio.create_task(self.db.save_task_queue(task))
         self._pending_commands.setdefault(agent_id, []).append({
             "type": "run_task",
             "task": task,
@@ -903,6 +1024,45 @@ class CenterNode:
         )
         return web.json_response({"tasks": combined}, dumps=_dumps)
 
+    async def _clear_tasks(self, request):
+        auth = self._authenticate(request)
+        if not auth or not auth.get("is_master"):
+            return _err("forbidden", "Master key required.", 403)
+
+        cleared_task_ids = {task.get("id") for task in self.task_queue if task.get("id")}
+        cleared_count = len(cleared_task_ids)
+
+        self.task_queue.clear()
+        self._task_results = {
+            task_id: result
+            for task_id, result in self._task_results.items()
+            if task_id not in cleared_task_ids
+        }
+
+        for agent_id, commands in list(self._pending_commands.items()):
+            retained = []
+            for command in commands:
+                task = command.get("task") if isinstance(command, dict) else None
+                task_id = task.get("id") if isinstance(task, dict) else None
+                if command.get("type") == "run_task" and task_id in cleared_task_ids:
+                    continue
+                retained.append(command)
+            if retained:
+                self._pending_commands[agent_id] = retained
+            else:
+                self._pending_commands.pop(agent_id, None)
+
+        await self.db.clear_task_queue()
+        await self._broadcast_update({
+            "type": "tasks_cleared",
+            "data": {"cleared_count": cleared_count},
+        })
+        return web.json_response({
+            "status": "success",
+            "cleared_count": cleared_count,
+            "note": "Queued commands were cleared. Already-running tasks on agents are not interrupted.",
+        })
+
     async def _get_task(self, request):
         auth = self._authenticate(request)
         if not auth:
@@ -940,6 +1100,11 @@ class CenterNode:
         try:
             data = json.loads(await request.read())
             agent_id = data["agent_id"]
+            identity_error = self._validate_agent_identity(
+                agent_id, self._extract_agent_secret(request, data)
+            )
+            if identity_error:
+                return identity_error
             record = data["task_record"]
 
             blocked = self._data_policy.get("blocked_fields", [])
@@ -967,6 +1132,8 @@ class CenterNode:
                     self._task_results[task_id] = record.get("result", "")
                 logger.debug(f"Task {task_id} result stored: {str(self._task_results[task_id])[:120]!r}")
             self.task_queue = [t for t in self.task_queue if t.get("id") != task_id]
+            if task_id:
+                asyncio.create_task(self.db.remove_from_queue(task_id))
 
             try:
                 with open(self._audit_log_path, "a") as af:
@@ -986,6 +1153,11 @@ class CenterNode:
             return _err("unauthorized", "Valid API key required.", 401)
         try:
             data = json.loads(await request.read())
+            identity_error = self._validate_agent_identity(
+                data.get("agent_id", ""), self._extract_agent_secret(request, data)
+            )
+            if identity_error:
+                return identity_error
             await self._broadcast_update({
                 "type": "task_stream",
                 "agent_id": data.get("agent_id"),
@@ -1097,20 +1269,20 @@ class CenterNode:
   table { border-collapse: collapse; width: 100%; margin-top: 16px; }
   th, td { text-align: left; padding: 6px 12px; border-bottom: 1px solid #222; font-size: 0.85rem; }
   th { color: #888; font-weight: normal; }
-  .online { color: #4ade80; } .offline { color: #f87171; }
+  .online { color: #4ade80; } .offline { color: #f87171; } .revoked { color: #f59e0b; }
   #log { margin-top: 16px; max-height: 240px; overflow-y: auto;
          background: #111; border: 1px solid #222; padding: 8px; font-size: 0.8rem; }
 </style>
 </head>
 <body>
-<h1>vimin-core <span class="badge">open-source edition</span></h1>
+<h1>vimin-core <span class="badge">source-available edition</span></h1>
 <p style="color:#666;font-size:0.8rem">
-  Upgrade to <a href="https://vimin.ai" style="color:#888">vimin</a> for &gt;10 nodes,
+  Upgrade to <a href="https://viminlabs.com" style="color:#888">vimin</a> for &gt;10 nodes,
   per-node targeting, fleet pipelines, and OpenClaw integration.
 </p>
 <div id="status">Loading…</div>
 <table id="agents-table">
-  <thead><tr><th>Node</th><th>Platform</th><th>NPU</th><th>Status</th><th>Last seen</th></tr></thead>
+  <thead><tr><th>Node</th><th>Platform</th><th>NPU</th><th>Status</th><th>Joined</th><th>Tasks</th><th>Last seen</th></tr></thead>
   <tbody id="agents-body"></tbody>
 </table>
 <div id="log"></div>
@@ -1135,6 +1307,8 @@ async function refresh() {
         <td>${a.platform || '—'}</td>
         <td>${a.npu_available ? '✓' : '—'}</td>
         <td class="${a.status}">${a.status}</td>
+        <td>${a.first_seen_at ? new Date(a.first_seen_at).toLocaleString() : '—'}</td>
+        <td>${(a.task_summary && a.task_summary.received_total) || 0}</td>
         <td>${new Date(a.last_heartbeat).toLocaleTimeString()}</td>
       </tr>`).join('');
   } catch(e) { document.getElementById('status').textContent = 'connecting…'; }

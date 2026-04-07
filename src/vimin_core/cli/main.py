@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import os
+import platform
 import sys
 from pathlib import Path
 
@@ -17,6 +18,16 @@ _R  = "\033[0m"                  # reset
 _LOGO = f"{_P}  ◈ {_W}vimin{_R}{_D}-core{_R}"
 
 _VIMIN_DIR = Path.home() / ".vimin"
+
+
+def _is_apple_silicon() -> bool:
+    return platform.system() == "Darwin" and platform.machine().lower() in ("arm64", "arm")
+
+
+def _default_model_for_host() -> str:
+    if _is_apple_silicon():
+        return "Qwen/Qwen2.5-3B-Instruct"
+    return "meta-llama/Llama-3.2-1B-Instruct"
 
 
 def _write_output(path_str: str, data: dict) -> Path:
@@ -350,7 +361,7 @@ def _cmd_start_agent(args) -> int:
     return 0
 
 
-_DEFAULT_MODEL = "mlx-community/Qwen2.5-3B-Instruct-4bit"
+_DEFAULT_MODEL = _default_model_for_host()
 
 
 def _cmd_broadcast(args) -> int:
@@ -649,10 +660,236 @@ def _cmd_stop_agent(_args) -> int:
     return code
 
 
+def _cmd_clear_tasks(_args) -> int:
+    import json
+    import urllib.request
+    import urllib.error
+    from vimin_core.cli.config import ensure_config
+
+    cfg = ensure_config()
+    api_key = (os.environ.get("ORCHESTRATOR_MASTER_KEY")
+               or os.environ.get("ORCHESTRATOR_API_KEY")
+               or cfg.get("api_key", ""))
+    center = cfg.get("center_url", "http://localhost:8080")
+
+    req = urllib.request.Request(
+        f"{center}/api/tasks/clear",
+        data=b"{}",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            body = json.loads(e.read())
+            msg = body.get("message", str(e))
+        except Exception:
+            msg = str(e)
+        print(f"\n  {_P}ERROR{_R}: {msg}\n")
+        return 1
+    except urllib.error.URLError:
+        print(f"\n  {_P}ERROR{_R}: Cannot connect to center at {center}.\n"
+              f"  Start it: {_W}vimin-core start-center{_R}\n")
+        return 1
+
+    print(f"\n  {_D}Cleared{_R} {_W}{data.get('cleared_count', 0)}{_R} {_D}queued task(s).{_R}")
+    note = data.get("note")
+    if note:
+        print(f"  {_D}{note}{_R}")
+    print()
+    return 0
+
+
+def _cmd_revoke_agent(args) -> int:
+    import json
+    import urllib.request
+    import urllib.error
+    from vimin_core.cli.config import ensure_config
+
+    cfg = ensure_config()
+    api_key = (os.environ.get("ORCHESTRATOR_MASTER_KEY")
+               or os.environ.get("ORCHESTRATOR_API_KEY")
+               or cfg.get("api_key", ""))
+    center = cfg.get("center_url", "http://localhost:8080")
+
+    req = urllib.request.Request(
+        f"{center}/api/agents/{args.agent_id}/revoke",
+        data=b"{}",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            body = json.loads(e.read())
+            msg = body.get("message", str(e))
+        except Exception:
+            msg = str(e)
+        print(f"\n  {_P}ERROR{_R}: {msg}\n")
+        return 1
+    except urllib.error.URLError:
+        print(f"\n  {_P}ERROR{_R}: Cannot connect to center at {center}.\n"
+              f"  Start it: {_W}vimin-core start-center{_R}\n")
+        return 1
+
+    print(f"\n  {_D}Revoked agent{_R} {_W}{data.get('agent_id', args.agent_id)}{_R}")
+    if data.get("revoked_at"):
+        print(f"  {_D}Revoked at:{_R} {_W}{data['revoked_at']}{_R}")
+    print()
+    return 0
+
+
+def _cmd_list_agents(_args) -> int:
+    import json
+    import urllib.request
+    import urllib.error
+    from vimin_core.cli.config import ensure_config
+
+    cfg = ensure_config()
+    api_key = (os.environ.get("ORCHESTRATOR_MASTER_KEY")
+               or os.environ.get("ORCHESTRATOR_API_KEY")
+               or cfg.get("api_key", ""))
+    center = cfg.get("center_url", "http://localhost:8080")
+
+    req = urllib.request.Request(
+        f"{center}/api/agents",
+        headers={"Authorization": f"Bearer {api_key}"},
+        method="GET",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            body = json.loads(e.read())
+            msg = body.get("message", str(e))
+        except Exception:
+            msg = str(e)
+        print(f"\n  {_P}ERROR{_R}: {msg}\n")
+        return 1
+    except urllib.error.URLError:
+        print(f"\n  {_P}ERROR{_R}: Cannot connect to center at {center}.\n"
+              f"  Start it: {_W}vimin-core start-center{_R}\n")
+        return 1
+
+    agents = data.get("agents", [])
+    _banner(
+        "vimin-core  ·  Agents",
+        [
+            ("Center", center),
+            ("Agents", str(len(agents))),
+            ("Node limit", str(data.get("node_limit", 10))),
+        ],
+    )
+
+    if not agents:
+        print(f"  {_D}No agents registered.{_R}\n")
+        return 0
+
+    for agent in agents:
+        agent_id = agent.get("agent_id", "")
+        hostname = agent.get("hostname") or "unknown"
+        status = agent.get("status") or "unknown"
+        platform_name = agent.get("platform") or "unknown"
+        loaded_model = agent.get("loaded_model_id") or "none"
+        summary = agent.get("task_summary") or {}
+        joined = agent.get("first_seen_at") or agent.get("registered_at") or "unknown"
+        print(f"{_P}  ── {hostname}{_R}  {_D}[{agent_id[:8]}]{_R}")
+        print(f"  {_D}status:{_R} {_W}{status}{_R}   {_D}platform:{_R} {_W}{platform_name}{_R}")
+        print(f"  {_D}joined:{_R} {_W}{joined}{_R}")
+        print(f"  {_D}model:{_R} {_W}{loaded_model}{_R}")
+        print(
+            f"  {_D}tasks:{_R} "
+            f"{_W}{summary.get('received_total', 0)} total{_R} / "
+            f"{_W}{summary.get('queued', 0)} queued{_R} / "
+            f"{_W}{summary.get('failed', 0)} failed{_R}"
+        )
+        print()
+    return 0
+
+
+def _cmd_show_agent(args) -> int:
+    import json
+    import urllib.request
+    import urllib.error
+    from vimin_core.cli.config import ensure_config
+
+    cfg = ensure_config()
+    api_key = (os.environ.get("ORCHESTRATOR_MASTER_KEY")
+               or os.environ.get("ORCHESTRATOR_API_KEY")
+               or cfg.get("api_key", ""))
+    center = cfg.get("center_url", "http://localhost:8080")
+
+    req = urllib.request.Request(
+        f"{center}/api/agents/{args.agent_id}",
+        headers={"Authorization": f"Bearer {api_key}"},
+        method="GET",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            body = json.loads(e.read())
+            msg = body.get("message", str(e))
+        except Exception:
+            msg = str(e)
+        print(f"\n  {_P}ERROR{_R}: {msg}\n")
+        return 1
+    except urllib.error.URLError:
+        print(f"\n  {_P}ERROR{_R}: Cannot connect to center at {center}.\n"
+              f"  Start it: {_W}vimin-core start-center{_R}\n")
+        return 1
+
+    agent = data.get("agent_info") or {}
+    metrics = data.get("latest_metrics") or {}
+    summary = data.get("task_summary") or {}
+
+    _banner(
+        "vimin-core  ·  Agent Detail",
+        [
+            ("Agent ID", agent.get("agent_id", args.agent_id)),
+            ("Host", agent.get("system_info", {}).get("hostname", "unknown")),
+            ("Status", agent.get("status", "unknown")),
+            ("Platform", agent.get("system_info", {}).get("platform", "unknown")),
+        ],
+    )
+
+    print(f"  {_D}first seen:{_R} {_W}{agent.get('first_seen_at', 'unknown')}{_R}")
+    print(f"  {_D}last heartbeat:{_R} {_W}{agent.get('last_heartbeat', 'unknown')}{_R}")
+    print(f"  {_D}loaded model:{_R} {_W}{agent.get('loaded_model_id') or 'none'}{_R}")
+    if agent.get("revoked_at"):
+        print(f"  {_D}revoked at:{_R} {_W}{agent['revoked_at']}{_R}")
+    print(
+        f"  {_D}tasks:{_R} "
+        f"{_W}{summary.get('received_total', 0)} total{_R} / "
+        f"{_W}{summary.get('queued', 0)} queued{_R} / "
+        f"{_W}{summary.get('completed', 0)} completed{_R} / "
+        f"{_W}{summary.get('failed', 0)} failed{_R}"
+    )
+    if metrics:
+        print(
+            f"  {_D}latest metrics:{_R} "
+            f"CPU {_W}{metrics.get('cpu_usage_percent', 0):.1f}%{_R} / "
+            f"RAM {_W}{metrics.get('memory_usage_percent', 0):.1f}%{_R} / "
+            f"avg latency {_W}{metrics.get('avg_latency_ms', 0):.1f} ms{_R}"
+        )
+    print()
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="vimin-core",
-        description="vimin-core — open-source local inference orchestration (up to 10 nodes)",
+        description="vimin-core — source-available local inference orchestration (up to 10 nodes)",
     )
     sub = parser.add_subparsers(dest="command")
 
@@ -722,6 +959,12 @@ def main():
     # stop-center / stop-agent
     sub.add_parser("stop-center", help="Stop a daemonized center node")
     sub.add_parser("stop-agent",  help="Stop all daemonized agent nodes")
+    sub.add_parser("clear-tasks", help="Clear queued tasks from the center node")
+    sub.add_parser("list-agents", help="List enrolled agents")
+    sa_detail = sub.add_parser("show-agent", help="Show one agent in detail")
+    sa_detail.add_argument("agent_id", help="Agent ID to inspect")
+    ra = sub.add_parser("revoke-agent", help="Revoke an agent and clear its queued work")
+    ra.add_argument("agent_id", help="Agent ID to revoke")
 
     args = parser.parse_args()
 
@@ -737,6 +980,14 @@ def main():
         return _cmd_stop_center(args)
     elif args.command == "stop-agent":
         return _cmd_stop_agent(args)
+    elif args.command == "clear-tasks":
+        return _cmd_clear_tasks(args)
+    elif args.command == "list-agents":
+        return _cmd_list_agents(args)
+    elif args.command == "show-agent":
+        return _cmd_show_agent(args)
+    elif args.command == "revoke-agent":
+        return _cmd_revoke_agent(args)
     else:
         parser.print_help()
         return 1

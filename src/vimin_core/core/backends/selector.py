@@ -15,6 +15,7 @@ Selection priority for ASR (SPEECH_TO_TEXT) tasks:
 from __future__ import annotations
 
 import logging
+import os
 import platform
 from typing import Optional
 
@@ -72,6 +73,7 @@ class BackendSelector:
         self._llamacpp = LlamaCppBackend()
         self._whisper = WhisperBackend()
         self._faster_whisper = FasterWhisperBackend()
+        self._openclaw = OpenClawBackend()
 
     def needs_generative_backend(self, descriptor: ModelDescriptor) -> bool:
         """
@@ -117,6 +119,16 @@ class BackendSelector:
 
         if not self.needs_generative_backend(descriptor):
             return None  # encoder-only tasks not currently supported
+
+        openclaw_requested = bool(os.environ.get("OPENCLAW_URL")) or descriptor.model_id == "openclaw"
+        if openclaw_requested:
+            if self._openclaw.is_available():
+                logger.info("BackendSelector: OpenClaw requested → OpenClawBackend")
+                return self._openclaw
+            logger.warning(
+                "BackendSelector: OpenClaw requested but gateway is unavailable; "
+                "falling back to local backends."
+            )
 
         apple_silicon = _is_apple_silicon()
 
@@ -202,12 +214,10 @@ class BackendSelector:
 
     def available_backends(self) -> dict[str, bool]:
         """Report which backends are installed (useful for dashboard / health check)."""
-        from vimin_core.core.backends.openclaw_backend import OpenClawBackend
-        _openclaw = OpenClawBackend()
         return {
             "mlx": self._mlx.is_available(),
             "llamacpp": self._llamacpp.is_available(),
             "whisper_mlx": self._whisper.is_available(),
             "whisper_cpu": self._faster_whisper.is_available(),
-            "openclaw": _openclaw.is_available(),
+            "openclaw": self._openclaw.is_available(),
         }

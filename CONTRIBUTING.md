@@ -53,7 +53,7 @@ vimin-core/
 ├── src/vimin_core/
 │   ├── cli/             # Command-line entry points (start-center, start-agent)
 │   ├── core/
-│   │   ├── backends/    # Inference backends: MLX, llama-cpp, Whisper, OpenClaw
+│   │   ├── backends/    # Inference backends: MLX, Llama-cpp, Whisper (MLX/Faster), OpenClaw
 │   │   ├── orchestrator.py
 │   │   ├── router.py
 │   │   └── task.py

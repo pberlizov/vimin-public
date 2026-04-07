@@ -49,6 +49,12 @@ class NPUOrchestrator:
         model_path: Optional[str] = None,
         config: Optional[OrchestratorConfig] = None,
     ):
+        import os
+        if os.environ.get("VIMIN_DEMO_MODE") == "1":
+            # In demo/test mode, we explicitly fail NPU initialization
+            # to force systems (like UserAgent) into their demo fallback paths.
+            raise RuntimeError("demo mode — no backend")
+
         self.logger = logging.getLogger(__name__)
 
         self.config = config or OrchestratorConfig(model_path=model_path)

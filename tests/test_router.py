@@ -136,8 +136,6 @@ class TestExecutionRouterDecision:
 class TestExecutionRouterFailover:
     def test_execute_batch_error_produces_valid_taskresult(self):
         """execute_batch must return a TaskResult with correct fields on per-task failure."""
-        from vimin_core.core.orchestrator import NPUOrchestrator
-        orch = NPUOrchestrator.__new__(NPUOrchestrator)
         # Minimal wiring — just test the error-path TaskResult construction
         from vimin_core.core.task import TaskResult, ExecutionTarget
         result = TaskResult(

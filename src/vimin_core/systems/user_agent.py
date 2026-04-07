@@ -14,7 +14,7 @@ import platform
 import re
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, asdict
 try:
@@ -31,6 +31,7 @@ try:
 except ImportError:
     ZEROCONF_AVAILABLE = False
 
+from vimin_core.cli.config import load_config, save_config
 from vimin_core.hardware.telemetry import TelemetryCollector
 from vimin_core.core.task import Task, TaskType, TaskComplexity
 
@@ -115,6 +116,7 @@ class UserAgent:
         # Continuous tasks: task_id → asyncio.Event (set to request stop)
         self._continuous_tasks: Dict[str, asyncio.Event] = {}
         self.model_registry = {}
+        self._agent_secret: Optional[str] = load_config().get("agent_secret")
 
         # Offline resilience: track connectivity; buffer telemetry to disk when
         # the center node is unreachable and replay it on reconnect.
@@ -262,12 +264,14 @@ class UserAgent:
         try:
             goodbye = {
                 "agent_id": self.agent_id,
-                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
                 "status": "offline",
                 "uptime_seconds": time.time() - self._start_time,
                 "loaded_model_id": self._loaded_model_id,
             }
             headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+            if self._agent_secret:
+                headers["X-Vimin-Agent-Secret"] = self._agent_secret
             self._heartbeat_sync(
                 f"{self.center_node_url}/api/agents/heartbeat",
                 goodbye,
@@ -336,11 +340,13 @@ class UserAgent:
                 "agent_id": self.agent_id,
                 "system_info": asdict(system_info),
                 "model_status": [asdict(m) for m in model_status],
-                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
                 "capabilities": self._get_capabilities(),
                 "session_key": self._session_key,  # Fernet key for payload encryption (None if unavailable)
                 "fleet_token": self.fleet_token,   # Fleet enrollment token (None if open registration)
             }
+            if self._agent_secret:
+                registration_data["agent_secret"] = self._agent_secret
             
             headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
             
@@ -350,6 +356,13 @@ class UserAgent:
                 headers=headers
             ) as response:
                 if response.status == 200:
+                    payload = await response.json()
+                    issued_secret = payload.get("agent_secret")
+                    if issued_secret and issued_secret != self._agent_secret:
+                        self._agent_secret = issued_secret
+                        cfg = load_config()
+                        cfg["agent_secret"] = issued_secret
+                        save_config(cfg)
                     logger.info("Successfully registered with center node")
                 else:
                     logger.error(f"Failed to register: {response.status}")
@@ -378,12 +391,14 @@ class UserAgent:
             try:
                 heartbeat_data = {
                     "agent_id": self.agent_id,
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                    "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
                     "status": "online",
                     "uptime_seconds": time.time() - self._start_time,
                     "loaded_model_id": self._loaded_model_id,
                 }
                 headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+                if self._agent_secret:
+                    headers["X-Vimin-Agent-Secret"] = self._agent_secret
                 url = f"{self.center_node_url}/api/agents/heartbeat"
                 status = await asyncio.to_thread(self._heartbeat_sync, url, heartbeat_data, headers)
                 if status == 200:
@@ -415,6 +430,8 @@ class UserAgent:
                 
                 # Send to center node
                 headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+                if self._agent_secret:
+                    headers["X-Vimin-Agent-Secret"] = self._agent_secret
                 
                 async with self.session.post(
                     f"{self.center_node_url}/api/agents/metrics",
@@ -445,6 +462,8 @@ class UserAgent:
         while self.running:
             try:
                 headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+                if self._agent_secret:
+                    headers["X-Vimin-Agent-Secret"] = self._agent_secret
                 url = f"{self.center_node_url}/api/agents/{self.agent_id}/pending-commands"
 
                 data = await asyncio.to_thread(self._poll_commands_sync, url, headers)
@@ -561,7 +580,7 @@ class UserAgent:
             error_rate = 0.0
         
         return PerformanceMetrics(
-            timestamp=datetime.utcnow().isoformat() + "Z",
+            timestamp=datetime.now(timezone.utc).isoformat() + "Z",
             cpu_usage_percent=psutil.cpu_percent(),
             memory_usage_percent=psutil.virtual_memory().percent,
             memory_available_gb=psutil.virtual_memory().available / (1024**3),
@@ -636,7 +655,7 @@ class UserAgent:
                     "error": f"Model '{model_id}' failed to load",
                     "execution_time_ms": 0,
                     "execution_target": "local",
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                    "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
                 })
                 return
         await self.execute_task(task)
@@ -722,7 +741,7 @@ class UserAgent:
                 'result': f'Completed {iteration} iteration(s) in {elapsed_ms / 1000:.1f}s',
                 'execution_time_ms': elapsed_ms,
                 'execution_target': 'continuous_local',
-                'timestamp': datetime.utcnow().isoformat() + 'Z',
+                'timestamp': datetime.now(timezone.utc).isoformat() + 'Z',
                 'continuous_iterations': iteration,
             }
             # Apply data policy before reporting
@@ -816,7 +835,7 @@ class UserAgent:
                     "result": result_for_center,
                     "execution_time_ms": execution_time * 1000,
                     "execution_target": execution_target,
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                    "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
                 }
                 if saved_path:
                     task_record["output_path"] = saved_path
@@ -938,7 +957,7 @@ class UserAgent:
                 "result": result_for_center,
                 "execution_time_ms": execution_time * 1000,
                 "execution_target": execution_target,
-                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
             }
             if saved_path:
                 task_record["output_path"] = saved_path
@@ -964,7 +983,7 @@ class UserAgent:
                 "error": str(exc),
                 "execution_time_ms": execution_time * 1000,
                 "execution_target": "unknown",
-                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
             }
             self.task_history.append(task_record)
             await self._report_task_completion(task_record)
@@ -990,7 +1009,7 @@ class UserAgent:
             return output, None
         output_dir = os.path.join(os.path.expanduser("~"), ".vimin", "outputs")
         os.makedirs(output_dir, exist_ok=True)
-        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         safe_type = task_type.lower().replace("_", "-")
         filename = f"{ts}_{safe_type}_{task_id[:12]}.txt"
         path = os.path.join(output_dir, filename)
@@ -1018,6 +1037,8 @@ class UserAgent:
         """
         try:
             headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+            if self._agent_secret:
+                headers["X-Vimin-Agent-Secret"] = self._agent_secret
             payload = {
                 "agent_id": self.agent_id,
                 "task_id": task_id,
@@ -1043,6 +1064,8 @@ class UserAgent:
         When the center node is unreachable the record is written to the local
         offline buffer so it can be replayed when connectivity is restored."""
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        if self._agent_secret:
+            headers["X-Vimin-Agent-Secret"] = self._agent_secret
 
         # Apply privacy filters
         report_data = task_record.copy()
@@ -1114,6 +1137,8 @@ class UserAgent:
 
         logger.info(f"Flushing {len(entries)} buffered event(s) to center node")
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        if self._agent_secret:
+            headers["X-Vimin-Agent-Secret"] = self._agent_secret
         failed: list = []
         for entry in entries:
             try:

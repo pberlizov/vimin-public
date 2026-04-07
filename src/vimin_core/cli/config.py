@@ -25,6 +25,8 @@ _DEFAULTS = {
     "agent_id": None,      # generated on first run, persisted so queued tasks survive restarts
 }
 
+_GENERATED_KEYS = {"fleet_token", "api_key", "agent_id"}
+
 
 def guess_local_ip(fallback: str = "127.0.0.1") -> str:
     """
@@ -76,7 +78,7 @@ def ensure_config() -> dict:
     changed = False
     for key, default in _DEFAULTS.items():
         if key not in cfg or cfg[key] is None:
-            if default is None:
+            if key in _GENERATED_KEYS:
                 cfg[key] = _gen_token()
             else:
                 cfg[key] = default

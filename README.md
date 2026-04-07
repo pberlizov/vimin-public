@@ -2,7 +2,7 @@
 
 # vimin-core
 
-Open-source local AI inference orchestration. Run open-source LLMs and speech models across up to **10 machines** — no cloud, no API keys, no data leaving your hardware.
+Source-available local AI inference orchestration. Run open-source LLMs and speech models across up to **10 machines** — no cloud services, generated local credentials, and no data leaving your hardware unless you choose to return results to the center.
 
 ## What it does
 
@@ -29,10 +29,10 @@ vimin-core lets you coordinate a fleet of machines (laptops, desktops, Mac minis
 - Offline AI workflows in air-gapped or privacy-sensitive environments
 - Comparing outputs from different models side-by-side
 
-**Limits in vimin-core (open-source):**
+**Limits in vimin-core (source-available edition):**
 - Maximum 10 nodes
-- No per-node targeting — pipelines auto-select an available agent per step
-- No role-based access control or audit logging
+- No per-node targeting — pipelines use basic center-driven scheduling
+- No role-based access control or compliance-grade audit reporting
 - No enterprise dashboard
 
 For larger fleets, per-node routing, and production features, see [viminlabs.com](https://viminlabs.com).
@@ -45,16 +45,16 @@ For larger fleets, per-node routing, and production features, see [viminlabs.com
 
 ```bash
 # Apple Silicon text models (recommended for M-series Macs)
-pip install "vimin-core[mlx] @ git+https://github.com/pberlizov/vimin-public.git"
+pip install "vimin-core[mlx] @ git+https://github.com/pberlizov/vimin-public.git#subdirectory=vimin-core"
 
 # Apple Silicon voice / speech-to-text (Whisper)
-pip install "vimin-core[whisper] @ git+https://github.com/pberlizov/vimin-public.git"
+pip install "vimin-core[whisper] @ git+https://github.com/pberlizov/vimin-public.git#subdirectory=vimin-core"
 
 # Any platform — CPU, CUDA, or Apple Metal via GGUF
-pip install "vimin-core[llamacpp] @ git+https://github.com/pberlizov/vimin-public.git"
+pip install "vimin-core[llamacpp] @ git+https://github.com/pberlizov/vimin-public.git#subdirectory=vimin-core"
 
 # Everything
-pip install "vimin-core[all] @ git+https://github.com/pberlizov/vimin-public.git"
+pip install "vimin-core[all] @ git+https://github.com/pberlizov/vimin-public.git#subdirectory=vimin-core"
 ```
 
 ### 2. Start the center node
@@ -141,15 +141,15 @@ vimin-core broadcast "What is the capital of Japan?" --mode return
 
 `--mode return` sends results back to your terminal and **auto-saves them** to `~/.vimin/outputs/broadcast-YYYYMMDD-HHMMSS.json`. `--mode broadcast` runs inference and saves results on the edge device only — nothing comes back to the center.
 
-**Offline queuing:** If an agent is offline when a broadcast goes out, the task is queued at the center. When that agent reconnects (using its persistent ID), the queued task is dispatched automatically. The result is not sent back to the original broadcast caller — it is written to the agent's log and the center's audit log.
+**Offline queuing:** If an agent is offline when a broadcast goes out, the task is queued durably at the center. When that agent reconnects (using its persistent ID), the queued task is dispatched automatically. The result is not sent back to the original broadcast caller — it is written to the agent's log and the center's audit log.
 
 To find offline task results:
 ```bash
 # Agent log (contains the model's output)
 tail -100 ~/.vimin/logs/agent-*.log
 
-# Center audit log (structured JSON records of all completed tasks)
-tail -20 ~/.vimin/audit.log
+# Center audit log (structured JSONL records of all completed tasks)
+tail -20 ~/.vimin/audit.jsonl
 ```
 
 ### 5. Run a pipeline
@@ -189,7 +189,7 @@ vimin-core run-pipeline \
 | `support-triage` | parallel [`CLASSIFICATION`, `SENTIMENT_ANALYSIS`] → `TEXT_GENERATION` | Classify and score sentiment in parallel, then draft a response |
 | `transcribe-and-analyze` | `SPEECH_TO_TEXT` → `TEXT_GENERATION` | Transcribe audio, then analyze the content |
 | `meeting-minutes` | `SPEECH_TO_TEXT` → `SUMMARIZATION` → `CLASSIFICATION` | Full meeting minutes: transcript → summary → action items |
-| `parallel-perspectives` | parallel [`REASONING`, `REASONING`] → `SUMMARIZATION` | Two agents reason independently, a third synthesizes |
+| `parallel-perspectives` | grouped [`REASONING`, `REASONING`] → `SUMMARIZATION` | Two reasoning tasks are launched together, then a final summarization step synthesizes them |
 
 Pass a file or inline text with `--file` or `--input`. Audio files (`.wav`, `.mp3`, `.m4a`, etc.) are automatically routed as paths for `SPEECH_TO_TEXT` steps.
 
@@ -215,6 +215,31 @@ Custom pipelines: write a JSON file and pass it with `--pipeline`:
 ```bash
 vimin-core run-pipeline --pipeline my_pipeline.json --input "..." --mode return
 ```
+
+### 6. Clear queued tasks
+
+```bash
+vimin-core clear-tasks
+```
+
+This clears the center node's queued task list and pending dispatch commands. It does **not** interrupt tasks that are already running on agents.
+
+### 7. Revoke an agent
+
+```bash
+vimin-core revoke-agent <agent-id>
+```
+
+Revoking an agent clears its queued work, prevents future reconnects with its old identity, and marks it as revoked in the center's agent list.
+
+### 8. Inspect agents
+
+```bash
+vimin-core list-agents
+vimin-core show-agent <agent-id>
+```
+
+Use these to inspect enrolled agents, their status, joined time, loaded model, and task counts from the center node.
 
 ---
 
@@ -435,6 +460,7 @@ After an agent first connects, a `pinned_center_url` key is added automatically.
 - The agent pins the center URL on first registration and warns if it changes, preventing silent redirections.
 - Task data is never executed as code — it is passed only to inference backends (MLX, llama-cpp, ONNX, Whisper).
 - The fleet token (`VIMIN_FLEET_TOKEN`) restricts which agents can register with your center.
+- Each enrolled agent also receives a per-agent secret on first registration. Future heartbeats, command polling, and reconnects must present that secret, preventing one enrolled node from impersonating another by reusing only the shared fleet credential.
 - The node limit of 10 is enforced at the center; registration is rejected beyond this.
 
 ---
@@ -476,15 +502,15 @@ vimin-core/
 
 vimin-core is released under the [Business Source License 1.1](LICENSE).
 
-**Free to use** for personal, research, academic, and internal non-commercial purposes, and for commercial evaluation on up to **5 devices**.
+**Free to use** for personal, research, academic, and internal non-commercial purposes, and for commercial evaluation on up to **10 connected nodes**.
 
 **A commercial license is required** if you:
-- Deploy across more than 5 devices in production
+- Deploy across **more than 10 nodes** in production
 - Offer vimin-core as a hosted or managed service to third parties
 - Embed it in commercial software you distribute to customers
 - Use it as the basis for a competing inference orchestration product
 
-The license converts to **Apache 2.0** on **2030-04-01**.
+The license converts to the **Apache License 2.0** on **April 6, 2030**.
 
 For commercial licensing: [pberlizov@college.harvard.edu](mailto:pberlizov@college.harvard.edu)
 
@@ -498,12 +524,13 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for how to report bugs, add model aliases
 
 ## vimin (full distribution)
 
-vimin-core is the open-source foundation. The full [vimin](https://viminlabs.com) distribution adds:
+vimin-core is the source-available foundation. The full [vimin](https://viminlabs.com) distribution adds:
 
 - Unlimited nodes
 - Per-node task targeting and tag-based routing
 - Fleet pipelines with advanced workflow orchestration
 - OpenClaw integration for device management
+- Manual approval for new agent enrollments
 - Role-based access control and audit logging
 - Advanced dashboard and analytics
 - Priority support

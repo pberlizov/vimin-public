@@ -260,6 +260,29 @@ class Database:
             conn.execute("DELETE FROM task_queue WHERE id=?", (task_id,))
             conn.commit()
 
+    async def clear_task_queue(self) -> None:
+        await asyncio.to_thread(self._clear_task_queue_sync)
+
+    def _clear_task_queue_sync(self) -> None:
+        with _open(self.path) as conn:
+            conn.execute("DELETE FROM task_queue")
+            conn.commit()
+
+    async def remove_tasks_for_agent(self, agent_id: str) -> None:
+        await asyncio.to_thread(self._remove_tasks_for_agent_sync, agent_id)
+
+    def _remove_tasks_for_agent_sync(self, agent_id: str) -> None:
+        with _open(self.path) as conn:
+            rows = conn.execute("SELECT id, record_json FROM task_queue").fetchall()
+            for row in rows:
+                try:
+                    record = json.loads(row["record_json"])
+                except Exception:
+                    continue
+                if record.get("assigned_agent") == agent_id:
+                    conn.execute("DELETE FROM task_queue WHERE id=?", (row["id"],))
+            conn.commit()
+
     # ------------------------------------------------------------------
     # Task history
     # ------------------------------------------------------------------
@@ -288,4 +311,3 @@ class Database:
                 ),
             )
             conn.commit()
-

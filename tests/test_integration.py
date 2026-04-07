@@ -178,26 +178,25 @@ class _AgentRunner:
 
         # Skip mDNS auto-discovery (would block 5 s on 127.0.0.1 URLs)
         os.environ["VIMIN_CENTER_URL"] = self.center_url
+        os.environ["VIMIN_DEMO_MODE"] = "1"
 
         # Patch NPUOrchestrator so agent falls back to demo mode (no GPU needed).
-        # The import happens inside start(), not at module level, so we patch
-        # the canonical source rather than the user_agent module namespace.
-        with patch("vimin_core.core.orchestrator.NPUOrchestrator",
-                   side_effect=RuntimeError("demo mode — no backend")):
-            async def _main() -> None:
-                self._agent = UserAgent(
-                    center_node_url=self.center_url,
-                    agent_id=self.agent_id,
-                    api_key=_API_KEY,
-                    fleet_token=None,
-                )
-                await self._agent.start()
-                self._ready.set()
-                try:
-                    await asyncio.Event().wait()
-                except asyncio.CancelledError:
-                    pass
-                await self._agent.stop()
+        # We no longer patch here with 'with patch' because it leaks from threads.
+        # Instead, the fixture uses monkeypatch.
+        async def _main() -> None:
+            self._agent = UserAgent(
+                center_node_url=self.center_url,
+                agent_id=self.agent_id,
+                api_key=_API_KEY,
+                fleet_token=None,
+            )
+            await self._agent.start()
+            self._ready.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                pass
+            await self._agent.stop()
 
             try:
                 self._loop.run_until_complete(_main())

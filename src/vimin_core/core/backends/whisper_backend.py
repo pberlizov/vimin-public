@@ -19,6 +19,7 @@ Or pass the mlx-community ID directly.
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 from typing import Optional, Union
 
@@ -81,11 +82,7 @@ class WhisperBackend(BaseBackend):
         self._loaded_id: Optional[str] = None
 
     def is_available(self) -> bool:
-        try:
-            import mlx_whisper  # noqa: F401
-            return True
-        except ImportError:
-            return False
+        return importlib.util.find_spec("mlx_whisper") is not None
 
     def estimate_memory_gb(self, descriptor: ModelDescriptor) -> float:
         if descriptor.estimated_size_gb is not None:

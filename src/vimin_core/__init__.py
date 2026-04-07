@@ -1,9 +1,9 @@
 """
-vimin-core — open-source local inference orchestration.
+vimin-core — source-available local inference orchestration.
 
 Coordinates up to 10 nodes, broadcast dispatch only.
 For larger fleets, per-node targeting, fleet pipelines, and integrations,
-see the full vimin distribution at https://vimin.ai.
+see the full vimin distribution at https://viminlabs.com.
 """
 
 try:

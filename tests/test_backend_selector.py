@@ -99,6 +99,8 @@ class TestBackendSelectorSelect:
         selector._llamacpp.is_available.return_value = llamacpp_available
         selector._whisper = MagicMock()
         selector._whisper.is_available.return_value = whisper_available
+        selector._openclaw = MagicMock()
+        selector._openclaw.is_available.return_value = False
         return selector
 
     def test_asr_routes_to_whisper_when_available(self):
@@ -144,3 +146,20 @@ class TestBackendSelectorSelect:
         selector = self._make_selector_with_mocks(mlx_available=False, llamacpp_available=False)
         d = ModelDescriptor(model_id="any/model", task="text-generation")
         assert selector.select(d) is None
+
+    @patch.dict("os.environ", {"OPENCLAW_URL": "http://127.0.0.1:18789"}, clear=False)
+    def test_openclaw_requested_prefers_openclaw_backend(self):
+        selector = self._make_selector_with_mocks(mlx_available=True, llamacpp_available=True)
+        selector._openclaw.is_available.return_value = True
+        d = ModelDescriptor(model_id="any/model", task="text-generation")
+        backend = selector.select(d)
+        assert backend is selector._openclaw
+
+    @patch.dict("os.environ", {"OPENCLAW_URL": "http://127.0.0.1:18789"}, clear=False)
+    @patch("vimin_core.core.backends.selector._is_apple_silicon", return_value=True)
+    def test_openclaw_unavailable_falls_back_to_local_backend(self, _):
+        selector = self._make_selector_with_mocks(mlx_available=True, llamacpp_available=True)
+        selector._openclaw.is_available.return_value = False
+        d = ModelDescriptor(model_id="any/model", task="text-generation")
+        backend = selector.select(d)
+        assert backend is selector._mlx

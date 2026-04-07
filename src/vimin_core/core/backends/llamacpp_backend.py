@@ -25,6 +25,7 @@ Pre-built wheels are also available at:
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 import os
 import platform
@@ -105,11 +106,7 @@ class LlamaCppBackend(BaseBackend):
     # ------------------------------------------------------------------
 
     def is_available(self) -> bool:
-        try:
-            import llama_cpp  # noqa: F401
-            return True
-        except ImportError:
-            return False
+        return importlib.util.find_spec("llama_cpp") is not None
 
     def estimate_memory_gb(self, descriptor: ModelDescriptor) -> float:
         if descriptor.estimated_size_gb is not None:

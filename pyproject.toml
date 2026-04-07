@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta:__legacy__"
 [project]
 name = "vimin-core"
 version = "0.1.0"
-description = "Open-source local AI inference orchestration — broadcast dispatch and multi-step pipelines across up to 10 nodes"
+description = "Source-available local AI inference orchestration — broadcast dispatch and multi-step pipelines across up to 10 nodes"
 requires-python = ">=3.10"
 license = { text = "BUSL-1.1" }
 dependencies = [

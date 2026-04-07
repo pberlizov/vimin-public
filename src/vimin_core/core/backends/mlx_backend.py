@@ -16,6 +16,7 @@ We prefer 4-bit variants to keep RAM pressure low on user machines.
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 from typing import Iterator, List, Optional
 
@@ -232,12 +233,12 @@ class MLXBackend(BaseBackend):
     # ------------------------------------------------------------------
 
     def is_available(self) -> bool:
-        try:
-            import mlx.core   # noqa: F401
-            import mlx_lm     # noqa: F401
-            return True
-        except ImportError:
-            return False
+        # Avoid importing MLX during capability checks: on some Python / macOS
+        # combinations, merely importing the extension can abort the process.
+        return (
+            importlib.util.find_spec("mlx.core") is not None
+            and importlib.util.find_spec("mlx_lm") is not None
+        )
 
     def estimate_memory_gb(self, descriptor: ModelDescriptor) -> float:
         if descriptor.estimated_size_gb is not None:

@@ -5,7 +5,7 @@ import os
 import logging
 from pathlib import Path
 from typing import Dict, Optional, List
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ class SecurityManager:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.parent.chmod(0o700)
             with open(self.config_path, 'w') as f:
-                json.dump({"keys": self.keys, "last_updated": datetime.utcnow().isoformat()}, f, indent=2)
+                json.dump({"keys": self.keys, "last_updated": datetime.now(timezone.utc).isoformat()}, f, indent=2)
             p.chmod(0o600)
         except Exception as e:
             logger.error(f"Failed to save security config: {e}")
@@ -54,7 +54,7 @@ class SecurityManager:
         self.keys[key_hash] = {
             "name": name,
             "role": role,
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
             "last_used": None
         }
         self._save_keys()
@@ -72,7 +72,7 @@ class SecurityManager:
         key_hash = self._hash_key(key)
         if key_hash in self.keys:
             # Update last used
-            self.keys[key_hash]["last_used"] = datetime.utcnow().isoformat()
+            self.keys[key_hash]["last_used"] = datetime.now(timezone.utc).isoformat()
             self._save_keys()
             return self.keys[key_hash]
             
@@ -93,3 +93,13 @@ class SecurityManager:
     def _hash_key(self, key: str) -> str:
         """Deterministic hash of the API key for safe storage"""
         return hashlib.sha256(key.encode()).hexdigest()
+
+    def hash_secret(self, secret: str) -> str:
+        """Deterministic hash helper for per-agent secrets."""
+        return self._hash_key(secret)
+
+    def verify_secret(self, secret: str, expected_hash: Optional[str]) -> bool:
+        """Return True when secret matches expected_hash."""
+        if not secret or not expected_hash:
+            return False
+        return secrets.compare_digest(self.hash_secret(secret), expected_hash)
