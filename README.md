@@ -45,16 +45,16 @@ For larger fleets, per-node routing, and production features, see [viminlabs.com
 
 ```bash
 # Apple Silicon text models (recommended for M-series Macs)
-pip install "vimin-core[mlx] @ git+https://github.com/pberlizov/vimin-public.git#subdirectory=vimin-core"
+pip install "vimin-core[mlx] @ git+https://github.com/pberlizov/vimin-public.git"
 
 # Apple Silicon voice / speech-to-text (Whisper)
-pip install "vimin-core[whisper] @ git+https://github.com/pberlizov/vimin-public.git#subdirectory=vimin-core"
+pip install "vimin-core[whisper] @ git+https://github.com/pberlizov/vimin-public.git"
 
 # Any platform — CPU, CUDA, or Apple Metal via GGUF
-pip install "vimin-core[llamacpp] @ git+https://github.com/pberlizov/vimin-public.git#subdirectory=vimin-core"
+pip install "vimin-core[llamacpp] @ git+https://github.com/pberlizov/vimin-public.git"
 
 # Everything
-pip install "vimin-core[all] @ git+https://github.com/pberlizov/vimin-public.git#subdirectory=vimin-core"
+pip install "vimin-core[all] @ git+https://github.com/pberlizov/vimin-public.git"
 ```
 
 ### 2. Start the center node
