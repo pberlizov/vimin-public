@@ -332,11 +332,14 @@ class TestPresets:
         has_parallel = any(isinstance(s, list) for s in data["steps"])
         assert has_parallel, "parallel-perspectives preset should contain a parallel step group"
 
-    def test_preset_dir_path_from_cli(self):
-        """The path computed by main.py resolves to the real presets dir."""
-        from vimin_core.cli.main import _PRESETS_DIR as cli_dir
-        assert cli_dir.exists(), f"CLI _PRESETS_DIR does not exist: {cli_dir}"
-        assert (cli_dir / "code-review.json").exists()
+    def test_preset_loader_from_cli(self):
+        """Presets are accessible via the CLI's importlib.resources loader."""
+        from vimin_core.cli.main import _available_preset_names, _read_preset_text
+        names = _available_preset_names()
+        assert "code-review" in names
+        text = _read_preset_text("code-review")
+        data = json.loads(text)
+        assert "steps" in data
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

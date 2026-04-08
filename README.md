@@ -45,16 +45,16 @@ More about the advanced version is on the website: [viminlabs.com](https://vimin
 
 ```bash
 # Apple Silicon text models (recommended for M-series Macs)
-pip install "vimin-core[mlx] @ git+https://github.com/pberlizov/vimin-public.git"
+pip install 'vimin-core[mlx]'
 
 # Apple Silicon voice / speech-to-text (Whisper)
-pip install "vimin-core[whisper] @ git+https://github.com/pberlizov/vimin-public.git"
+pip install 'vimin-core[whisper]'
 
 # Any platform: CPU, CUDA, or Apple Metal via GGUF
-pip install "vimin-core[llamacpp] @ git+https://github.com/pberlizov/vimin-public.git"
+pip install 'vimin-core[llamacpp]'
 
 # Everything
-pip install "vimin-core[all] @ git+https://github.com/pberlizov/vimin-public.git"
+pip install 'vimin-core[all]'
 ```
 
 ### 2. Start the center node

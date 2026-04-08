@@ -4,15 +4,32 @@ build-backend = "setuptools.build_meta:__legacy__"
 
 [project]
 name = "vimin-core"
-version = "0.1.0"
+version = "0.1.1"
 description = "Source-available local AI inference orchestration — broadcast dispatch and multi-step pipelines across up to 10 nodes"
+readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "BUSL-1.1" }
+keywords = ["ai", "inference", "orchestration", "llm", "local-ai", "mlx", "fleet", "agents"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+]
+
 dependencies = [
     "aiohttp>=3.10",
     "aiohttp-cors>=0.7",
     "psutil>=5.9",
 ]
+
+[project.urls]
+Homepage = "https://viminlabs.com"
+Repository = "https://github.com/pberlizov/vimin-public"
+"Bug Tracker" = "https://github.com/pberlizov/vimin-public/issues"
 
 [project.optional-dependencies]
 # Local inference backends — install at least one
