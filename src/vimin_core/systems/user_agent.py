@@ -951,11 +951,19 @@ class UserAgent:
                     async with self._inference_lock:
                         result = await asyncio.to_thread(self.orchestrator.execute_task, task)
                     success = result.success if hasattr(result, "success") else True
-                    output = (
-                        result.result
-                        if hasattr(result, "result") and result.result is not None
-                        else result.output if hasattr(result, "output") else "Task completed"
-                    )
+                    if success:
+                        output = (
+                            result.result
+                            if hasattr(result, "result") and result.result is not None
+                            else result.output if hasattr(result, "output") else ""
+                        )
+                    else:
+                        output = (
+                            result.error_message
+                            if hasattr(result, "error_message") and result.error_message
+                            else result.error if hasattr(result, "error") and result.error
+                            else "Task failed"
+                        )
                     raw_target = (
                         result.execution_target if hasattr(result, "execution_target") else "local"
                     )
@@ -977,6 +985,8 @@ class UserAgent:
             output_str = (output[:32768] if isinstance(output, str) else "") if output else ""
             if output_str:
                 print(f"[vimin] Output:\n{output_str}", flush=True)
+            elif not success:
+                print(f"[vimin] ERROR: task {task_id} failed with no output", flush=True)
 
             save_local = task.metadata.get("save_local", False) if hasattr(task, "metadata") else False
             result_for_center, saved_path = self._handle_save_local(

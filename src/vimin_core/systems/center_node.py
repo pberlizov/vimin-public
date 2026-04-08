@@ -940,9 +940,12 @@ class CenterNode:
         pipeline_id    = f"pipe_{int(time.time() * 1000)}"
         save_local     = body.get("mode", "return") == "broadcast"
 
-        # Seed substitution map with the top-level input
+        # Seed substitution map with the top-level input.
+        # `stepN_output` is tracked across atomic steps so parallel groups can
+        # expose each branch output individually to later prompts.
         outputs: Dict[str, str] = {"input": pipeline_input}
         step_results = []
+        atomic_step_num = 0
 
         logger.info(f"Pipeline {pipeline_id} ({pipeline_name}) starting — "
                     f"{len(steps)} step(s), {len(alive_agents)} node(s)")
@@ -955,6 +958,7 @@ class CenterNode:
                     # ── Parallel group ──────────────────────────────────────
                     group_results = []
                     for sub_idx, sub_spec in enumerate(step_spec):
+                        atomic_step_num += 1
                         agent_id = alive_agents[sub_idx % len(alive_agents)]
                         resolved = self._substitute_templates(
                             sub_spec.get("data", ""), outputs
@@ -965,19 +969,26 @@ class CenterNode:
                             save_local=save_local,
                         )
                         group_results.append(result)
+                        raw_out = result.get("output") or ""
+                        if not str(raw_out).startswith("[saved_locally]"):
+                            outputs[f"step{atomic_step_num}_output"] = raw_out
+                        label = sub_spec.get("label")
+                        if label and not str(raw_out).startswith("[saved_locally]"):
+                            outputs[f"{label}_output"] = raw_out
 
-                    outputs[f"step{step_num}_output"] = "\n---\n".join(
+                    outputs[f"step{step_num}_group_output"] = "\n---\n".join(
                         r["output"] for r in group_results
                         if r.get("output") and not str(r.get("output", "")).startswith("[saved_locally]")
                     )
                     step_results.append({
                         "step": step_num, "parallel": True,
                         "results": group_results,
-                        "output": outputs[f"step{step_num}_output"],
+                        "output": outputs[f"step{step_num}_group_output"],
                     })
 
                 else:
                     # ── Sequential step ────────────────────────────────────
+                    atomic_step_num += 1
                     agent_id = alive_agents[0]
                     resolved = self._substitute_templates(
                         step_spec.get("data", ""), outputs
@@ -990,9 +1001,14 @@ class CenterNode:
                     raw_out = result.get("output") or ""
                     # In broadcast mode the result is a file path ref — don't
                     # forward "[saved_locally] /path" as text into the next step.
-                    outputs[f"step{step_num}_output"] = (
+                    outputs[f"step{atomic_step_num}_output"] = (
                         "" if str(raw_out).startswith("[saved_locally]") else raw_out
                     )
+                    label = step_spec.get("label")
+                    if label:
+                        outputs[f"{label}_output"] = (
+                            "" if str(raw_out).startswith("[saved_locally]") else raw_out
+                        )
                     step_results.append({
                         "step": step_num, "parallel": False,
                         "results": [result],
@@ -1005,7 +1021,7 @@ class CenterNode:
             logger.error(f"Pipeline {pipeline_id} error at step {step_num}: {e}")
             return _err("pipeline_error", f"Step {step_num} failed: {e}", 500)
 
-        final_output = outputs.get(f"step{len(steps)}_output", "")
+        final_output = outputs.get(f"step{atomic_step_num}_output", "")
         return web.json_response({
             "status": "success",
             "pipeline_id": pipeline_id,

@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import pathlib
+import pwd
 import urllib.error
 import urllib.request
 from typing import Iterator, List, Optional
@@ -40,16 +41,39 @@ from vimin_core.core.backends.base import BaseBackend, ModelDescriptor
 logger = logging.getLogger(__name__)
 
 _DEFAULT_URL = "http://127.0.0.1:18789"
-_TOKEN_PATH = pathlib.Path.home() / ".openclaw" / "openclaw.json"
+_DEFAULT_TOKEN_PATH = pathlib.Path.home() / ".openclaw" / "openclaw.json"
+_TOKEN_PATH = _DEFAULT_TOKEN_PATH
+def _candidate_config_paths() -> list[pathlib.Path]:
+    paths: list[pathlib.Path] = []
+    config_path = os.environ.get("OPENCLAW_CONFIG_PATH")
+    if config_path:
+        paths.append(pathlib.Path(config_path).expanduser())
+    paths.append(_TOKEN_PATH)
+    if _TOKEN_PATH == _DEFAULT_TOKEN_PATH:
+        try:
+            real_home = pathlib.Path(pwd.getpwuid(os.getuid()).pw_dir)
+            fallback = real_home / ".openclaw" / "openclaw.json"
+            if fallback not in paths:
+                paths.append(fallback)
+        except Exception:
+            pass
+    return paths
 
 
 def _load_openclaw_token() -> str:
-    """Read the gateway auth token from ~/.openclaw/openclaw.json."""
-    try:
-        data = json.loads(_TOKEN_PATH.read_text())
-        return data["gateway"]["auth"]["token"]
-    except Exception:
-        return os.environ.get("OPENCLAW_TOKEN", "")
+    """Read the gateway auth token from the active OpenClaw config."""
+    env_token = os.environ.get("OPENCLAW_TOKEN", "")
+    if env_token:
+        return env_token
+    for path in _candidate_config_paths():
+        try:
+            data = json.loads(path.read_text())
+            token = data["gateway"]["auth"]["token"]
+            if token:
+                return token
+        except Exception:
+            continue
+    return ""
 
 
 class OpenClawBackend(BaseBackend):
@@ -114,9 +138,12 @@ class OpenClawBackend(BaseBackend):
                 "  Ensure OpenClaw is running: openclaw gateway start"
             )
             return False
-        # Use the descriptor's model_id as a hint if provided
-        if descriptor.model_id and descriptor.model_id != "openclaw":
+        # OpenClaw's API expects a gateway-owned identifier like "openclaw" or
+        # "openclaw/<agentId>", not a raw upstream Hugging Face model name.
+        if descriptor.model_id and str(descriptor.model_id).startswith("openclaw"):
             self._model = descriptor.model_id
+        else:
+            self._model = "openclaw"
         self._loaded = True
         logger.info(f"OpenClawBackend: ready — {self._url}  model={self._model}")
         return True
