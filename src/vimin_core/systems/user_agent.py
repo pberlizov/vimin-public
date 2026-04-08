@@ -131,6 +131,7 @@ class UserAgent:
         # in the registration payload; if cryptography is not installed the
         # agent still works — tasks will just be sent in plaintext.
         self._loaded_model_id: Optional[str] = None  # Model currently loaded in memory
+        self._model_ready = asyncio.Event()  # Set once a generative model is loaded
 
         # Whisper backend for SPEECH_TO_TEXT tasks (lazy-loaded on first STT task)
         self._whisper_backend = None
@@ -647,6 +648,7 @@ class UserAgent:
             )
             if ok:
                 self._loaded_model_id = model_id
+                self._model_ready.set()
                 elapsed = time.time() - t0
                 logger.info(f"Model loaded successfully: {model_id}")
                 print(f"[vimin] Model ready: {model_id} ({elapsed:.1f}s)", flush=True)
@@ -796,6 +798,17 @@ class UserAgent:
             else str(getattr(task, "type", "unknown"))
         )
         print(f"[vimin] Task received: {task_id} — running inference ...", flush=True)
+
+        # If the model is still loading (e.g. a queued task arrives on reconnect
+        # before the background model-load finishes), wait up to 30 s for it to
+        # be ready before attempting inference.
+        task_type = getattr(task, "type", None)
+        needs_generative = task_type not in (TaskType.SPEECH_TO_TEXT,)
+        if needs_generative and not self._model_ready.is_set():
+            try:
+                await asyncio.wait_for(asyncio.shield(self._model_ready.wait()), timeout=30.0)
+            except asyncio.TimeoutError:
+                logger.warning(f"Task {task_id}: model not ready after 30 s, proceeding anyway")
 
         try:
             # ----------------------------------------------------------------
