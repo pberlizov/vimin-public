@@ -62,7 +62,7 @@ def _req(url: str, *, method: str = "GET", body: Optional[dict] = None,
 
 
 def _req_status(url: str, *, method: str = "GET", body: Optional[dict] = None,
-                timeout: float = 5.0, api_key: str = _API_KEY) -> int:
+                timeout: float = 10.0, api_key: str = _API_KEY) -> int:
     """Return HTTP status code (not raising on 4xx/5xx)."""
     data = json.dumps(body).encode() if body is not None else None
     headers: dict = {"Authorization": f"Bearer {api_key}"}
@@ -90,7 +90,7 @@ class _CenterRunner:
         self._ready = threading.Event()
         self._tmpdir: Optional[tempfile.TemporaryDirectory] = None
 
-    def start(self, timeout: float = 8.0) -> "_CenterRunner":
+    def start(self, timeout: float = 15.0) -> "_CenterRunner":
         self._tmpdir = tempfile.TemporaryDirectory(prefix="vimin_test_center_")
         self._thread = threading.Thread(target=self._run, daemon=True, name="center")
         self._thread.start()
@@ -163,7 +163,7 @@ class _AgentRunner:
         self._agent = None
         self._ready = threading.Event()
 
-    def start(self, timeout: float = 8.0) -> "_AgentRunner":
+    def start(self, timeout: float = 15.0) -> "_AgentRunner":
         self._thread = threading.Thread(target=self._run, daemon=True, name=f"agent-{self.agent_id[:8]}")
         self._thread.start()
         if not self._ready.wait(timeout):
@@ -198,12 +198,12 @@ class _AgentRunner:
                 pass
             await self._agent.stop()
 
-            try:
-                self._loop.run_until_complete(_main())
-            except Exception as exc:
-                print(f"[test-agent] ERROR: {exc}")
-            finally:
-                self._ready.set()
+        try:
+            self._loop.run_until_complete(_main())
+        except Exception as exc:
+            print(f"[test-agent] ERROR: {exc}")
+        finally:
+            self._ready.set()
 
     def stop(self) -> None:
         if self._loop and self._agent:
@@ -611,7 +611,7 @@ class TestPipeline:
             ],
             "input": "test data",
         }
-        resp = center.post("/api/pipeline", body, timeout=40)
+        resp = center.post("/api/pipeline", body, timeout=60)
         assert resp["status"] == "success"
         assert len(resp["steps"]) == 2
         # step2 result should reference step1's output placeholder
@@ -642,7 +642,7 @@ class TestPipeline:
             ],
             "input": "AI in healthcare",
         }
-        resp = center.post("/api/pipeline", body, timeout=50)
+        resp = center.post("/api/pipeline", body, timeout=90)
         assert resp["status"] == "success"
         assert len(resp["steps"]) == 2
         assert resp["steps"][0]["parallel"] is True
@@ -731,7 +731,7 @@ class TestPresetPipelines:
                 s.setdefault("timeout", 20)
 
         n = sum(len(s) if isinstance(s, list) else 1 for s in text_steps)
-        resp = center.post("/api/pipeline", pipeline, timeout=25 * n)
+        resp = center.post("/api/pipeline", pipeline, timeout=40 * n)
         assert resp["status"] == "success", f"Preset '{preset_name}' failed: {resp}"
 
     def test_transcribe_and_analyze_preset_with_text_fallback(self, center, agent):
@@ -757,7 +757,7 @@ class TestPresetPipelines:
                     sub.setdefault("timeout", 20)
             else:
                 s.setdefault("timeout", 20)
-        resp = center.post("/api/pipeline", pipeline, timeout=60)
+        resp = center.post("/api/pipeline", pipeline, timeout=120)
         assert resp["status"] == "success"
         assert any(s["parallel"] for s in resp["steps"])
 

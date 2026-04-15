@@ -150,6 +150,18 @@ class LocalWorker:
         backend_name = type(backend).__name__
         try:
             prompt = task.data if isinstance(task.data, str) else str(task.data)
+
+            # Inject task-type-specific system instructions for generative backends
+            if task.type == TaskType.PII_MASKING:
+                prompt = (
+                    "You are a privacy-compliance assistant. "
+                    "Redact ALL personally identifiable information (PII) from the text below. "
+                    "Replace each PII item with a bracketed label such as [NAME], [EMAIL], "
+                    "[PHONE], [DOB], [ADDRESS], [ID], [NHS_NUMBER], [SSN], or [REDACTED]. "
+                    "Return ONLY the redacted text with no commentary.\n\n"
+                    + prompt
+                )
+
             max_tokens = task.metadata.get("max_tokens", 256)
             temperature = task.metadata.get("temperature", 0.7)
             stop_sequences = task.metadata.get("stop_sequences", None)
