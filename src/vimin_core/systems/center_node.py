@@ -438,14 +438,16 @@ class CenterNode:
         auth = self._authenticate(request)
         if not auth:
             return _err("unauthorized", "Valid API key required.", 401)
+        is_admin = auth.get("is_master") or auth.get("role") == "admin"
         try:
             data = json.loads(await request.read())
             agent_id = data["agent_id"]
-            identity_error = self._validate_agent_identity(
-                agent_id, self._extract_agent_secret(request, data)
-            )
-            if identity_error:
-                return identity_error
+            if not is_admin:
+                identity_error = self._validate_agent_identity(
+                    agent_id, self._extract_agent_secret(request, data)
+                )
+                if identity_error:
+                    return identity_error
             if agent_id in self.agents:
                 agent = self.agents[agent_id]
                 agent.last_heartbeat = data["timestamp"]
@@ -529,11 +531,15 @@ class CenterNode:
         if not auth:
             return _err("unauthorized", "Valid API key required.", 401)
         agent_id = request.match_info["agent_id"]
-        identity_error = self._validate_agent_identity(
-            agent_id, self._extract_agent_secret(request)
-        )
-        if identity_error:
-            return identity_error
+        # Admins (master key) can poll any agent's command queue without a secret.
+        # Agents must still verify their own identity.
+        is_admin = auth.get("is_master") or auth.get("role") == "admin"
+        if not is_admin:
+            identity_error = self._validate_agent_identity(
+                agent_id, self._extract_agent_secret(request)
+            )
+            if identity_error:
+                return identity_error
         cmds = self._pending_commands.pop(agent_id, [])
         if cmds:
             logger.info(f"Delivering {len(cmds)} pending command(s) to agent {agent_id}")

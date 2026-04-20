@@ -248,10 +248,15 @@ class MLXBackend(BaseBackend):
     def is_available(self) -> bool:
         # Avoid importing MLX during capability checks: on some Python / macOS
         # combinations, merely importing the extension can abort the process.
-        return (
-            importlib.util.find_spec("mlx.core") is not None
-            and importlib.util.find_spec("mlx_lm") is not None
-        )
+        # find_spec on a dotted path raises ModuleNotFoundError when the parent
+        # package is absent entirely (Python 3.11+), so guard with try/except.
+        try:
+            return (
+                importlib.util.find_spec("mlx.core") is not None
+                and importlib.util.find_spec("mlx_lm") is not None
+            )
+        except (ModuleNotFoundError, ValueError):
+            return False
 
     def estimate_memory_gb(self, descriptor: ModelDescriptor) -> float:
         if descriptor.estimated_size_gb is not None:
