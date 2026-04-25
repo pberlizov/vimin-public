@@ -4,6 +4,24 @@
 
 Source-available local AI inference orchestration for up to **10 machines**. Run open-source LLMs and speech models without a cloud service, with local credentials and local execution by default.
 
+## Built for environments where data cannot leave your network
+
+Most AI tooling assumes a cloud connection. vimin-core is built for the opposite assumption.
+
+**Your data never leaves your machines.** Every model runs locally — on your hardware, under your control. No API calls to OpenAI, Anthropic, or anyone else. No telemetry. No usage logging to a remote server.
+
+This makes vimin-core practical for environments where that guarantee is not optional:
+
+- **Air-gapped networks** — research labs, defence contractors, secure government facilities, and OT/industrial environments that have no internet access by default. vimin-core works fully offline once models are downloaded. Models can be pre-loaded onto drives and transferred manually.
+- **Healthcare and legal** — patient records, case files, and clinical notes processed locally, with no risk of PHI or privileged information leaving the building. The `PII_MASKING` pipeline step adds an explicit redaction layer before any downstream processing.
+- **Financial services** — trade data, client records, and internal research that cannot touch a shared cloud inference endpoint. Multi-step analysis pipelines run entirely within your perimeter.
+- **Enterprise on-premise** — teams that have negotiated strict data-residency requirements or are under audit. vimin-core runs on hardware you already own; there is nothing to whitelist, no SaaS contract to review.
+- **Developer privacy** — run local LLMs in your own workflow without your prompts and outputs being collected for training.
+
+The network trust model is minimal by design. Agents authenticate with a shared secret. The center node exposes a single HTTP port; all other coordination happens over that channel. TLS and firewall rules are left to your infrastructure so you can layer vimin-core into an existing security perimeter without re-architecting it.
+
+---
+
 ## What it does
 
 vimin-core lets you coordinate a fleet of machines (laptops, desktops, Mac minis, servers) to run local AI inference together. You start a **center node** on one machine as the orchestration hub, then connect **agent nodes** on each machine that will run models.
