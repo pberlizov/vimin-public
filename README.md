@@ -500,19 +500,7 @@ vimin-core/
 
 ## License
 
-vimin-core is released under the [Business Source License 1.1](LICENSE).
-
-**Free to use** for personal, research, academic, and internal non-commercial purposes, and for commercial evaluation on up to **10 connected nodes**.
-
-**A commercial license is required** if you:
-- Deploy across **more than 10 nodes** in production
-- Offer vimin-core as a hosted or managed service to third parties
-- Embed it in commercial software you distribute to customers
-- Use it as the basis for a competing inference orchestration product
-
-The license converts to the **Apache License 2.0** on **April 6, 2030**.
-
-For commercial licensing: [pberlizov@college.harvard.edu](mailto:pberlizov@college.harvard.edu)
+vimin-core is released under the [MIT License](LICENSE). Use it freely in personal, commercial, or open-source projects.
 
 ---
 

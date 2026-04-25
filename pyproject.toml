@@ -8,7 +8,7 @@ version = "0.1.1"
 description = "Source-available local AI inference orchestration — broadcast dispatch and multi-step pipelines across up to 10 nodes"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "BUSL-1.1" }
+license = { text = "MIT" }
 keywords = ["ai", "inference", "orchestration", "llm", "local-ai", "mlx", "fleet", "agents"]
 classifiers = [
     "Development Status :: 4 - Beta",
