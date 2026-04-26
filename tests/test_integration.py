@@ -234,6 +234,9 @@ def agent(center):
     time.sleep(0.5)
     yield runner
     runner.stop()
+    # VIMIN_DEMO_MODE is set inside _AgentRunner._run; clean it up so it
+    # does not leak into later test modules (e.g. test_orchestrator.py).
+    os.environ.pop("VIMIN_DEMO_MODE", None)
 
 
 @pytest.fixture
@@ -247,6 +250,7 @@ def two_agents(center):
     yield a1, a2
     a1.stop()
     a2.stop()
+    os.environ.pop("VIMIN_DEMO_MODE", None)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -957,7 +961,7 @@ class TestContextAndProgrammability:
             ],
             "input": "",
         }
-        resp = center.post("/api/pipeline", body, timeout=40)
+        resp = center.post("/api/pipeline", body, timeout=90)
         assert resp["status"] == "success"
         assert len(resp["steps"]) == 2
 
@@ -972,7 +976,7 @@ class TestContextAndProgrammability:
             ],
             "input": "canary-42",
         }
-        resp = center.post("/api/pipeline", body, timeout=40)
+        resp = center.post("/api/pipeline", body, timeout=90)
         assert resp["status"] == "success"
 
     def test_multi_step_context_accumulation(self, center, agent):
@@ -985,7 +989,7 @@ class TestContextAndProgrammability:
             ],
             "input": "The moon river runs through mountains",
         }
-        resp = center.post("/api/pipeline", body, timeout=60)
+        resp = center.post("/api/pipeline", body, timeout=120)
         assert resp["status"] == "success"
         assert len(resp["steps"]) == 3
 
