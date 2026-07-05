@@ -8,15 +8,15 @@ Source-available local AI inference orchestration for up to **10 machines**. Run
 
 Most AI tooling assumes a cloud connection. vimin-core is built for the opposite assumption.
 
-**Your data never leaves your machines.** Every model runs locally — on your hardware, under your control. No API calls to OpenAI, Anthropic, or anyone else. No telemetry. No usage logging to a remote server.
+**Your data never leaves your machines.** Every model runs locally - on your hardware, under your control. No API calls to OpenAI, Anthropic, or anyone else. No telemetry. No usage logging to a remote server.
 
 This makes vimin-core practical for environments where that guarantee is not optional:
 
-- **Air-gapped networks** — research labs, defence contractors, secure government facilities, and OT/industrial environments that have no internet access by default. vimin-core works fully offline once models are downloaded. Models can be pre-loaded onto drives and transferred manually.
-- **Healthcare and legal** — patient records, case files, and clinical notes processed locally, with no risk of PHI or privileged information leaving the building. The `PII_MASKING` pipeline step adds an explicit redaction layer before any downstream processing.
-- **Financial services** — trade data, client records, and internal research that cannot touch a shared cloud inference endpoint. Multi-step analysis pipelines run entirely within your perimeter.
-- **Enterprise on-premise** — teams that have negotiated strict data-residency requirements or are under audit. vimin-core runs on hardware you already own; there is nothing to whitelist, no SaaS contract to review.
-- **Developer privacy** — run local LLMs in your own workflow without your prompts and outputs being collected for training.
+- **Air-gapped networks** - research labs, defence contractors, secure government facilities, and OT/industrial environments that have no internet access by default. vimin-core works fully offline once models are downloaded. Models can be pre-loaded onto drives and transferred manually.
+- **Healthcare and legal** - patient records, case files, and clinical notes processed locally, with no risk of PHI or privileged information leaving the building. The `PII_MASKING` pipeline step adds an explicit redaction layer before any downstream processing.
+- **Financial services** - trade data, client records, and internal research that cannot touch a shared cloud inference endpoint. Multi-step analysis pipelines run entirely within your perimeter.
+- **Enterprise on-premise** - teams that have negotiated strict data-residency requirements or are under audit. vimin-core runs on hardware you already own; there is nothing to whitelist, no SaaS contract to review.
+- **Developer privacy** - run local LLMs in your own workflow without your prompts and outputs being collected for training.
 
 The network trust model is minimal by design. Agents authenticate with a shared secret. The center node exposes a single HTTP port; all other coordination happens over that channel. TLS and firewall rules are left to your infrastructure so you can layer vimin-core into an existing security perimeter without re-architecting it.
 
@@ -282,7 +282,7 @@ vimin-core ships with built-in aliases for the models below. Pass the canonical 
 | `Qwen/Qwen3-1.7B` | 1.7B | ~1.5 GB | Qwen3; fast with reasoning support |
 | `HuggingFaceTB/SmolLM2-1.7B-Instruct` | 1.7B | ~1.5 GB | Compact general purpose |
 
-**Mid-range (2–6 GB RAM, 8 GB+ Mac recommended)**
+**Mid-range (2-6 GB RAM, 8 GB+ Mac recommended)**
 
 | Model | Params | RAM (4-bit) | Notes |
 |-------|--------|-------------|-------|
@@ -296,7 +296,7 @@ vimin-core ships with built-in aliases for the models below. Pass the canonical 
 | `microsoft/Phi-3.5-mini-instruct` | 3.8B | ~3 GB | Microsoft; strong reasoning |
 | `Qwen/Qwen2.5-Coder-1.5B-Instruct` | 1.5B | ~1 GB | Code-optimised |
 
-**Standard (6–10 GB RAM, 16 GB Mac recommended)**
+**Standard (6-10 GB RAM, 16 GB Mac recommended)**
 
 | Model | Params | RAM (4-bit) | Notes |
 |-------|--------|-------------|-------|
@@ -313,7 +313,7 @@ vimin-core ships with built-in aliases for the models below. Pass the canonical 
 | `google/gemma-2-9b-it` | 9B | ~7 GB | Google; strong instruction following |
 | `google/gemma-3-12b-it` | 12B | ~9 GB | Gemma 3 mid-range |
 
-**Large (12–40 GB RAM, Mac Studio / Pro / server)**
+**Large (12-40 GB RAM, Mac Studio / Pro / server)**
 
 | Model | Params | RAM (4-bit) | Notes |
 |-------|--------|-------------|-------|
